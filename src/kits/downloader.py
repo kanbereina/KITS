@@ -59,26 +59,47 @@ class TwitchDownloader:
             return False
 
     async def detect_end_number(
-        self, base_url: str, start_num: int, extension: str, max_fails: int = 100
+        self, base_url: str, extension: str, start: int = 0
     ) -> int:
-        """向后探测最后一个存在的分片编号。"""
-        print("🔍 正在检测视频长度...")
+        """指数探测 + 二分查找最后一个存在的分片编号。
+
+        请求数约 2·log2(N)，远快于逐个线性探测。
+        start 为已知存在的下界（默认 0）。探测点示例:
+        0 -> 1 -> 2 -> 4 -> ... -> 1024 -> 2048(✗)，再在 (1024, 2048) 二分。
+        """
+        print("🔍 正在检测视频长度（指数探测 + 二分）...")
         async with httpx.AsyncClient(headers=_HEADERS) as client:
-            num = start_num
-            last_success = start_num
-            fails = 0
-            while fails < max_fails:
-                if await self._exists(client, f"{base_url}{num}{extension}"):
-                    last_success = num
-                    print(f"  ✓ 找到文件: {num}.ts", end="\r")
-                    fails = 0
+            if not await self._exists(client, f"{base_url}{start}{extension}"):
+                raise RuntimeError(
+                    f"起始分片 {start}.ts 不存在，请用 --start 指定真实起始编号"
+                )
+
+            # 1) 指数探测上界：步长翻倍，直到某编号不存在
+            lo = start  # 已知存在
+            step = 1
+            hi = start + step
+            while await self._exists(client, f"{base_url}{hi}{extension}"):
+                print(f"  ✓ {hi}.ts 存在，继续向后探测...", end="\r")
+                lo = hi
+                step *= 2
+                hi = start + step
+            print(f"\n  📈 上界落在 ({lo}, {hi}) 区间，开始二分...")
+
+            # 2) 二分查找：lo 存在、hi 不存在，收敛到最后一个存在的编号
+            left, right = lo, hi
+            while left + 1 < right:
+                mid = (left + right) // 2
+                if await self._exists(client, f"{base_url}{mid}{extension}"):
+                    left = mid
+                    print(f"  ✓ {mid}.ts 存在", end="\r")
                 else:
-                    print(f"\n  📍 最后一个文件: {last_success}.ts")
-                    break
-                num += 1
-        total = last_success - start_num + 1
-        print(f"\n✅ 检测完成: 从 {start_num} 到 {last_success}，共 {total} 个文件")
-        return last_success
+                    right = mid
+                    print(f"  ✗ {mid}.ts 不存在", end="\r")
+            last = left
+
+        total = last - start + 1
+        print(f"\n✅ 检测完成: 从 {start} 到 {last}，共 {total} 个文件")
+        return last
 
     async def _download_one(
         self, client: httpx.AsyncClient, url: str, index: int, retry: int = 3
@@ -206,14 +227,16 @@ class TwitchDownloader:
         print(f"\n🎬 开始处理: {url}")
         print("=" * 60)
 
-        base_url, detected_start, extension = parse_url_pattern(url)
-        start_num = detected_start if start_num is None else start_num
+        # URL 里的编号仅用于定位 base_url，默认从 0 开始下载整场直播。
+        # 只有显式传入 --start 才作为起点，配合 --end 可下载指定范围分段。
+        base_url, _url_num, extension = parse_url_pattern(url)
+        start = 0 if start_num is None else start_num
         if end_num is None:
-            end_num = await self.detect_end_number(base_url, start_num, extension)
-        if start_num > end_num:
-            raise ValueError("起始编号大于结束编号")
+            end_num = await self.detect_end_number(base_url, extension, start=start)
+        if start > end_num:
+            raise ValueError(f"起始编号 {start} 大于结束编号 {end_num}")
 
-        ts_files = await self.download_range(base_url, start_num, end_num, extension)
+        ts_files = await self.download_range(base_url, start, end_num, extension)
         if not ts_files:
             raise RuntimeError("未能下载任何 TS 文件")
 
