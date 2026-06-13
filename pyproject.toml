@@ -15,9 +15,19 @@ dependencies = [
 requires = ["uv_build>=0.10.12,<0.11.0"]
 build-backend = "uv_build"
 
+# 防止镜像源没完全同步，缺失某些包，比如：numpy
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
 [[tool.uv.index]]
 name = "aliyun-pytorch"
 url = "https://mirrors.aliyun.com/pytorch-wheels/cu128"
 
 [tool.uv.sources]
 torch = { index = "aliyun-pytorch" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.17",
+]
