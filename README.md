@@ -1,20 +1,23 @@
 # KITS
 
-基于 [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) 的鹿乃 Twitch 直播总结工具，把**直播音频**转换成**完整句子、带时间戳的 SRT 字幕文件**。支持 50 系 Nvidia 显卡（CUDA 12.8）。
+基于 [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) 的鹿乃 Twitch 直播总结工具。可以**下载 Twitch 直播**、合并为 MP4 / 提取 MP3，并把音频转换成**完整句子、带时间戳的 SRT 字幕文件**。支持 50 系 Nvidia 显卡（CUDA 12.8）。
 
 ## 特性
 
+- 🐙 异步并发下载 Twitch 直播 TS 分片，自动探测视频长度，合并为 MP4
+- 🎵 可选提取 MP3 音频，可选保留 / 清理临时 TS 文件
 - 🎤 使用 Whisper large-v3-turbo 进行语音识别，速度快、精度高
 - ✂️ **单词级时间戳**断句，按句末标点 / 停顿 / 长度上限智能切分，保证句子完整不被拦腰截断
+- 🔗 下载与字幕一条龙：一条命令从直播 URL 直达 SRT 字幕
 - 🧹 自动清理重复字符与乱码，并抑制模型的幻觉式重复
-- ⚙️ 命令行参数可调，断句松紧、字幕长度都能按音频微调
 - 📄 输出标准 SRT，可直接拖入播放器或视频剪辑软件
 
 ## 环境要求
 
 - Python 3.12 ~ 3.14
-- 支持 CUDA 的 Nvidia 显卡（程序会强制要求 GPU，CPU 不可用）
+- 支持 CUDA 的 Nvidia 显卡（转录字幕时强制要求 GPU；仅下载视频则不需要）
 - CUDA 12.8（PyTorch 从 `pytorch-cu128` 源安装）
+- [ffmpeg](https://ffmpeg.org/download.html)（合并 MP4、提取 MP3 需要，须在 PATH 中）
 - 已安装 [uv](https://docs.astral.sh/uv/)
 
 ## 安装
@@ -28,21 +31,54 @@ uv sync
 
 ## 使用方法
 
-输入音频文件为**必填项**，用 `-i` 指定:
+工具提供两个子命令:`download`（下载直播）和 `subtitle`（音频转字幕）。
+
+### download：下载 Twitch 直播
+
+传入任意一个 TS 分片的 URL（形如 `https://.../chunked/1710.ts`），自动探测整场直播范围并下载合并:
 
 ```bash
-uv run kits -i your_audio.mp3
+# 下载并合并为 MP4
+uv run kits download "https://.../chunked/1710.ts" -o my_stream
+
+# 下载 + 提取 MP3
+uv run kits download "https://.../chunked/1710.ts" -o my_stream --mp3
+
+# 一条龙：下载 -> 提取音频 -> 生成 SRT 字幕
+uv run kits download "https://.../chunked/1710.ts" -o my_stream --srt
 ```
 
-默认输出到 `subtitle.srt`。可用 `-o` 自定义输出路径:
+产物默认放在 `downloads/` 目录下。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `url` | （必填） | TS 分片示例 URL |
+| `-o, --output` | `output` | 输出文件名（不含扩展名） |
+| `--dir` | `downloads` | 下载 / 输出目录 |
+| `--start` | 从 URL 提取 | 起始分片编号 |
+| `--end` | 自动探测 | 结束分片编号 |
+| `--concurrent` | `5` | 最大并发下载数 |
+| `--keep-ts` | 关闭 | 保留临时 TS 文件 |
+| `--mp3` | 关闭 | 额外导出 MP3 |
+| `--srt` | 关闭 | 额外生成 SRT 字幕（自动转录，隐含导出 MP3） |
+
+> `--srt` 会调用 Whisper 转录，需要 GPU。还支持下方 `subtitle` 的全部断句参数（`--max-gap` 等）。
+
+### subtitle：音频转字幕
+
+已有音频文件时，直接转 SRT。输入为**必填项**，用 `-i` 指定:
 
 ```bash
-uv run kits -i your_audio.mp3 -o output.srt
+uv run kits subtitle -i your_audio.mp3
 ```
 
-> 也可以用 `uv run python main.py -i ...`，效果等价（`main.py` 是薄入口）。
+默认输出到 `subtitle.srt`，可用 `-o` 自定义:
 
-### 命令行参数
+```bash
+uv run kits subtitle -i your_audio.mp3 -o output.srt
+```
+
+> 也可以用 `uv run python main.py subtitle -i ...`，效果等价（`main.py` 是薄入口）。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -57,14 +93,14 @@ uv run kits -i your_audio.mp3 -o output.srt
 ### 示例
 
 ```bash
-# 转录日语直播，输出到指定文件
-uv run kits -i live_2026.mp3 -o live_2026.srt
+# 转录日语直播音频，输出到指定文件
+uv run kits subtitle -i live_2026.mp3 -o live_2026.srt
 
 # 句子偏碎时，调大停顿阈值让句子更连贯
-uv run kits -i live_2026.mp3 --max-gap 1.0
+uv run kits subtitle -i live_2026.mp3 --max-gap 1.0
 
 # 转录英语内容
-uv run kits -i talk.mp3 --language english
+uv run kits subtitle -i talk.mp3 --language english
 ```
 
 ## 项目结构
@@ -74,11 +110,19 @@ src/kits/
   __init__.py      # 包入口，导出字幕相关 API
   subtitle.py      # 纯逻辑：单词时间戳 -> 完整句子 -> SRT（无 torch 依赖，可单测）
   transcriber.py   # Whisper 模型加载 + GPU 转录，产出单词级时间戳
-  cli.py           # 命令行入口
+  downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
+  cli.py           # 命令行入口（download / subtitle 子命令）
 main.py            # 薄入口，委托给 kits.cli
 ```
 
-转录（`transcriber`）与字幕生成（`subtitle`）已解耦:`transcriber.transcribe()` 产出单词级时间戳列表，`subtitle.segment_sentences()` 负责断句、`write_srt()` 负责落盘。后续接入 **Twitch 音频下载** 和 **DeepSeek 总结分析** 时，只需在 `src/kits/` 下新增 `downloader.py`、`summarizer.py` 模块即可复用现有转录结果。
+各模块职责清晰、相互解耦:
+
+- `downloader.TwitchDownloader` 下载并合并直播，产出 MP4 / MP3，不依赖 torch
+- `transcriber.Transcriber.transcribe()` 把音频转成单词级时间戳列表
+- `subtitle.segment_sentences()` 负责断句、`write_srt()` 负责落盘
+- `cli` 把三者串成流水线：`download --srt` 即「下载 -> 提取音频 -> 转字幕」
+
+后续接入 **DeepSeek 总结分析** 时，只需在 `src/kits/` 下新增 `summarizer.py`，吃 `transcriber` 的文本或 `subtitle` 的句子即可，并在 `cli` 中加一个 `summarize` 子命令。
 
 ## 断句逻辑
 
