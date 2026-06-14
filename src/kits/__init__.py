@@ -7,9 +7,11 @@ from kits.subtitle import (
     Sentence,
     Word,
     clean_text,
+    parse_srt,
     seconds_to_srt_time,
     segment_sentences,
     sentences_to_srt,
+    srt_time_to_seconds,
     write_srt,
 )
 
@@ -17,8 +19,10 @@ __all__ = [
     "Sentence",
     "Word",
     "clean_text",
+    "parse_srt",
     "seconds_to_srt_time",
     "segment_sentences",
     "sentences_to_srt",
+    "srt_time_to_seconds",
     "write_srt",
 ]

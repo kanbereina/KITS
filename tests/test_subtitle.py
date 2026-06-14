@@ -5,9 +5,11 @@ from __future__ import annotations
 from kits.subtitle import (
     Word,
     clean_text,
+    parse_srt,
     seconds_to_srt_time,
     segment_sentences,
     sentences_to_srt,
+    srt_time_to_seconds,
     write_srt,
 )
 
@@ -170,3 +172,68 @@ class TestWriteSrt:
         content = out.read_text(encoding="utf-8")
         assert "テスト。" in content
         assert "00:00:00,000 --> 00:00:01,000" in content
+
+
+class TestSrtTimeToSeconds:
+    def test_zero(self):
+        assert srt_time_to_seconds("00:00:00,000") == 0.0
+
+    def test_with_millis(self):
+        assert srt_time_to_seconds("00:00:01,500") == 1.5
+
+    def test_hours_minutes_seconds(self):
+        assert srt_time_to_seconds("01:02:03,456") == 3723.456
+
+    def test_roundtrip_with_seconds_to_srt_time(self):
+        # 与 seconds_to_srt_time 互逆
+        for sec in (0.0, 1.5, 3723.456, 59.999):
+            assert srt_time_to_seconds(seconds_to_srt_time(sec)) == sec
+
+
+class TestParseSrt:
+    def test_parses_single_block(self):
+        srt = "1\n00:00:00,000 --> 00:00:02,600\nこんにちは。\n"
+        result = parse_srt(srt)
+        assert len(result) == 1
+        assert result[0]["start"] == 0.0
+        assert result[0]["end"] == 2.6
+        assert result[0]["text"] == "こんにちは。"
+
+    def test_parses_multiple_blocks(self):
+        srt = (
+            "1\n00:00:00,000 --> 00:00:02,600\nこんにちは。\n"
+            "\n"
+            "2\n00:00:05,000 --> 00:00:06,800\nありがとう\n"
+        )
+        result = parse_srt(srt)
+        assert len(result) == 2
+        assert result[1]["text"] == "ありがとう"
+
+    def test_roundtrip_with_sentences_to_srt(self):
+        # parse_srt 是 sentences_to_srt 的逆操作
+        sentences = [
+            {"start": 0.0, "end": 2.6, "text": "こんにちは。"},
+            {"start": 5.0, "end": 6.8, "text": "ありがとう"},
+        ]
+        assert parse_srt(sentences_to_srt(sentences)) == sentences
+
+    def test_handles_crlf_line_endings(self):
+        srt = "1\r\n00:00:00,000 --> 00:00:01,000\r\nテスト\r\n"
+        result = parse_srt(srt)
+        assert len(result) == 1
+        assert result[0]["text"] == "テスト"
+
+    def test_handles_multiline_text(self):
+        srt = "1\n00:00:00,000 --> 00:00:02,000\n第一行\n第二行\n"
+        result = parse_srt(srt)
+        assert len(result) == 1
+        assert result[0]["text"] == "第一行\n第二行"
+
+    def test_skips_block_without_timestamp(self):
+        srt = "这是一段没有时间轴的文字\n\n1\n00:00:00,000 --> 00:00:01,000\n有效\n"
+        result = parse_srt(srt)
+        assert len(result) == 1
+        assert result[0]["text"] == "有效"
+
+    def test_empty_input(self):
+        assert parse_srt("") == []
