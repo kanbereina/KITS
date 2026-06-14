@@ -1,7 +1,8 @@
-"""命令行入口：子命令 download / subtitle。
+"""命令行入口：子命令 download / subtitle / translate。
 
-download: 下载 Twitch 直播 -> 合并 MP4 -> 可选 MP3 / SRT
-subtitle: 已有音频 -> SRT 字幕
+download:  下载 Twitch 直播 -> 合并 MP4 -> 可选 MP3 / SRT
+subtitle:  已有音频 -> SRT 字幕
+translate: 日语 SRT -> 中文 SRT（DeepSeek 翻译）
 后续可在此扩展 summarize 子命令（DeepSeek 总结）。
 """
 
@@ -11,7 +12,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from kits.subtitle import Sentence, segment_sentences, write_srt
+from kits.subtitle import Sentence, parse_srt, segment_sentences, write_srt
 
 
 def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
@@ -48,6 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("-i", "--input", required=True, help="输入音频文件(必填)")
     st.add_argument("-o", "--output", default="subtitle.srt", help="输出 SRT 文件")
     _add_subtitle_args(st)
+
+    # --- translate 子命令 ---
+    tr = sub.add_parser("translate", help="把日语 SRT 翻译成中文 SRT(DeepSeek)")
+    tr.add_argument("-i", "--input", required=True, help="输入 SRT 字幕文件(必填)")
+    tr.add_argument("-o", "--output", default=None, help="输出 SRT(默认在原名后加 .zh)")
+    tr.add_argument("--api-key", default=None, help="DeepSeek API Key(默认读环境变量 DEEPSEEK_API_KEY)")
+    tr.add_argument("--model", default="deepseek-chat", help="DeepSeek 模型名")
+    tr.add_argument("--batch-size", type=int, default=20, help="每批翻译的字幕条数")
 
     return parser
 
@@ -121,12 +130,51 @@ def _run_subtitle(args: argparse.Namespace) -> None:
     print("\n💡 提示: 可以直接将 SRT 文件拖入播放器或视频编辑软件使用")
 
 
+def _run_translate(args: argparse.Namespace) -> None:
+    from kits.translator import DeepSeekTranslator
+
+    print("=" * 60)
+    print("🌐 DeepSeek 字幕翻译（日语 -> 中文）")
+    print("=" * 60)
+
+    input_path = Path(args.input)
+    if not input_path.is_file():
+        raise FileNotFoundError(f"找不到输入字幕文件: {input_path}")
+
+    sentences = parse_srt(input_path.read_text(encoding="utf-8"))
+    if not sentences:
+        raise RuntimeError(f"未能从 {input_path} 解析出任何字幕")
+    print(f"📄 已读取 {len(sentences)} 条字幕")
+
+    # 默认输出在原名后插入 .zh，如 live.srt -> live.zh.srt
+    output_path = (
+        Path(args.output)
+        if args.output
+        else input_path.with_suffix(f".zh{input_path.suffix}")
+    )
+
+    translator = DeepSeekTranslator(
+        api_key=args.api_key, model=args.model, batch_size=args.batch_size
+    )
+    translated = translator.translate(sentences)
+    write_srt(translated, str(output_path))
+
+    print(f"\n✅ 中文字幕已保存到: {output_path}")
+    print("\n📝 预览前10条:")
+    for i, sent in enumerate(translated[:10], 1):
+        preview = sent["text"][:50] + ("..." if len(sent["text"]) > 50 else "")
+        print(f"{i:3d}. [{sent['start']:6.1f}s -> {sent['end']:6.1f}s] {preview}")
+    print("\n💡 提示: 可以直接将 SRT 文件拖入播放器或视频编辑软件使用")
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.command == "download":
         _run_download(args)
     elif args.command == "subtitle":
         _run_subtitle(args)
+    elif args.command == "translate":
+        _run_translate(args)
 
 
 if __name__ == "__main__":

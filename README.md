@@ -1,6 +1,6 @@
 # KITS
 
-基于 [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) 的鹿乃 Twitch 直播总结工具。可以**下载 Twitch 直播**、合并为 MP4 / 提取 MP3，并把音频转换成**完整句子、带时间戳的 SRT 字幕文件**。支持 50 系 Nvidia 显卡（CUDA 12.8）。
+基于 [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) 的鹿乃 Twitch 直播总结工具。可以**下载 Twitch 直播**、合并为 MP4 / 提取 MP3，把音频转换成**完整句子、带时间戳的 SRT 字幕文件**，并可调用 **DeepSeek 把日语字幕翻译成中文**。支持 50 系 Nvidia 显卡（CUDA 12.8）。
 
 ## 特性
 
@@ -9,6 +9,7 @@
 - 🎤 使用 Whisper large-v3-turbo 进行语音识别，速度快、精度高
 - ✂️ **单词级时间戳**断句，按句末标点 / 停顿 / 长度上限智能切分，保证句子完整不被拦腰截断
 - 🔗 下载与字幕一条龙：一条命令从直播 URL 直达 SRT 字幕
+- 🌐 调用 DeepSeek 把日语 SRT 翻译成中文 SRT，逐条对应、保留原时间轴
 - 🧹 自动清理重复字符与乱码，并抑制模型的幻觉式重复
 - 📄 输出标准 SRT，可直接拖入播放器或视频剪辑软件
 
@@ -31,7 +32,7 @@ uv sync
 
 ## 使用方法
 
-工具提供两个子命令:`download`（下载直播）和 `subtitle`（音频转字幕）。
+工具提供三个子命令:`download`（下载直播）、`subtitle`（音频转字幕）和 `translate`（日语字幕译中文）。
 
 ### download：下载 Twitch 直播
 
@@ -90,6 +91,31 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | `--max-chars` | `60` | 单条字幕最大字符数 |
 | `--max-duration` | `15.0` | 单条字幕最大时长（秒） |
 
+### translate：日语字幕译中文
+
+把已有的日语 SRT 字幕调用 DeepSeek 翻译成中文 SRT，逐条对应、保留原时间轴。需要 DeepSeek API Key：
+
+```bash
+# 用环境变量提供 Key（推荐）
+export DEEPSEEK_API_KEY=sk-xxxx
+uv run kits translate -i live.srt
+
+# 或用命令行参数传入 Key，并自定义输出
+uv run kits translate -i live.srt -o live_cn.srt --api-key sk-xxxx
+```
+
+不指定 `-o` 时，输出默认在原文件名后插入 `.zh`，如 `live.srt` → `live.zh.srt`。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-i, --input` | （必填） | 输入 SRT 字幕文件路径 |
+| `-o, --output` | `原名.zh.srt` | 输出 SRT 文件路径 |
+| `--api-key` | 读环境变量 | DeepSeek API Key，缺省读 `DEEPSEEK_API_KEY` |
+| `--model` | `deepseek-chat` | DeepSeek 模型名 |
+| `--batch-size` | `20` | 每批翻译的字幕条数 |
+
+> 翻译只替换文本、保留时间戳。字幕按批发送给模型逐条翻译，某条译文缺失时会回退保留原日语，避免时间轴错位。
+
 ### 示例
 
 ```bash
@@ -108,10 +134,11 @@ uv run kits subtitle -i talk.mp3 --language english
 ```
 src/kits/
   __init__.py      # 包入口，导出字幕相关 API
-  subtitle.py      # 纯逻辑：单词时间戳 -> 完整句子 -> SRT（无 torch 依赖，可单测）
+  subtitle.py      # 纯逻辑：单词时间戳 -> 完整句子 -> SRT，含 SRT 解析（无 torch 依赖，可单测）
   transcriber.py   # Whisper 模型加载 + GPU 转录，产出单词级时间戳
   downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
-  cli.py           # 命令行入口（download / subtitle 子命令）
+  translator.py    # 调用 DeepSeek 把日语 SRT 翻译成中文 SRT（仅依赖 httpx）
+  cli.py           # 命令行入口（download / subtitle / translate 子命令）
 main.py            # 薄入口，委托给 kits.cli
 ```
 
@@ -119,8 +146,9 @@ main.py            # 薄入口，委托给 kits.cli
 
 - `downloader.TwitchDownloader` 下载并合并直播，产出 MP4 / MP3，不依赖 torch
 - `transcriber.Transcriber.transcribe()` 把音频转成单词级时间戳列表
-- `subtitle.segment_sentences()` 负责断句、`write_srt()` 负责落盘
-- `cli` 把三者串成流水线：`download --srt` 即「下载 -> 提取音频 -> 转字幕」
+- `subtitle.segment_sentences()` 负责断句、`write_srt()` 负责落盘、`parse_srt()` 负责把 SRT 读回句子列表
+- `translator.DeepSeekTranslator.translate()` 把句子列表逐批译成中文，仅依赖 httpx
+- `cli` 把它们串成流水线：`download --srt` 即「下载 -> 提取音频 -> 转字幕」
 
 后续接入 **DeepSeek 总结分析** 时，只需在 `src/kits/` 下新增 `summarizer.py`，吃 `transcriber` 的文本或 `subtitle` 的句子即可，并在 `cli` 中加一个 `summarize` 子命令。
 
