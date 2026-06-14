@@ -33,6 +33,14 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-chunk", type=float, default=600.0, help="单段硬上限时长(秒)")
     parser.add_argument("--silence-db", type=float, default=-30.0, help="静音判定响度阈值(dB)")
     parser.add_argument("--min-silence", type=float, default=0.5, help="最短静音时长(秒)")
+    parser.add_argument(
+        "--filter-game",
+        action="append",
+        metavar="GAME",
+        default=None,
+        help="剔除指定游戏的系统播报/技能语音(整条完全匹配才删)，"
+        "大小写不敏感、可多次指定，如 --filter-game valorant；目前支持: valorant(valo)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -82,6 +90,15 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
 
     transcriber = Transcriber()
     all_sentences: list[Sentence] = []
+    filtered_total = 0
+
+    # 解析待过滤的游戏词表（提前解析，无效游戏名在转录前就报错）
+    callouts = None
+    if args.filter_game:
+        from kits.filters import resolve_games
+
+        callouts = resolve_games(args.filter_game)
+        print(f"🎮 已启用游戏播报过滤: {', '.join(args.filter_game)}")
 
     print("\n" + "=" * 60)
     print("🎬 分段转录 + 生成 SRT 字幕")
@@ -104,10 +121,17 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
                 max_chars=args.max_chars,
                 max_duration=args.max_duration,
             )
+            if callouts is not None:
+                from kits.filters import filter_sentences
+
+                sentences, removed = filter_sentences(sentences, callouts)
+                filtered_total += removed
             total = writer.append(sentences)
             all_sentences.extend(sentences)
             print(f"  ✍️  已写入 {len(sentences)} 条，累计 {total} 条 -> {output_srt}")
 
+    if callouts is not None:
+        print(f"  🧹 已过滤游戏播报 {filtered_total} 条")
     if not all_sentences:
         raise RuntimeError("未获取到任何字幕内容")
     _print_preview(all_sentences, output_srt)
