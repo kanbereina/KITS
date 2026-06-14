@@ -60,6 +60,18 @@ class TestCleanText:
         # 同一字符连续 4 次以上压成 2 次
         assert clean_text("わーーーーい") == "わーーい"
 
+    def test_collapses_phrase_repeats(self):
+        # 2 字短语重复 3 次以上压成 2 次（抑制「はっはっはっ」式幻觉）
+        assert clean_text("はっはっはっはっはっ") == "はっはっ"
+
+    def test_collapses_longer_phrase_repeats(self):
+        # 多字短语重复也折叠
+        assert clean_text("ここだここだここだここだ") == "ここだここだ"
+
+    def test_keeps_single_phrase_repeat(self):
+        # 只重复一次（出现 2 次）属正常强调，不折叠
+        assert clean_text("だめだめ") == "だめだめ"
+
     def test_empty_string(self):
         assert clean_text("") == ""
 
@@ -145,6 +157,37 @@ class TestSegmentSentences:
         assert result[0]["start"] == 0.0
         # end 在 start 之上有兜底
         assert result[0]["end"] > result[0]["start"]
+
+    def test_clamps_duration_when_timestamps_missing(self):
+        # 中间词时间戳缺失，老逻辑会让句子无限拉长；现应被钳制在 max_duration 内
+        words = [_word("あ", 0.0, 1.0)]
+        words += [_word("ん", None, None) for _ in range(50)]
+        words.append(_word("ん", 120.0, 121.0))
+        result = segment_sentences(
+            words, max_gap=1000.0, max_chars=10000, max_duration=15.0
+        )
+        for sent in result:
+            assert sent["end"] - sent["start"] <= 15.0 + 1e-6
+
+    def test_hard_splits_when_over_max_chars_without_soft_break(self):
+        # 超过字符上限且无逗号可切：按词边界硬切，而非整段合成一条
+        words = [_word("あいうえお", float(i), float(i) + 1.0) for i in range(5)]
+        result = segment_sentences(
+            words, max_gap=1000.0, max_chars=5, max_duration=1000.0
+        )
+        assert len(result) > 1
+
+    def test_duration_split_uses_last_known_end(self):
+        # 时长判定基于「最后已知 end - 第一已知 start」，即便末词时间戳缺失也能断
+        words = [
+            _word("あ、", 0.0, 1.0),
+            _word("い", 20.0, 21.0),
+            _word("う", None, None),
+        ]
+        result = segment_sentences(
+            words, max_gap=1000.0, max_chars=10000, max_duration=15.0
+        )
+        assert len(result) >= 2
 
 
 class TestSentencesToSrt:

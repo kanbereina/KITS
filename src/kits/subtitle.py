@@ -58,6 +58,8 @@ def clean_text(text: str) -> str:
     text = re.sub(r"([ぁぃぅぇぉっゃゅょ])\1{2,}", r"\1", text)
     # 任意字符连续 4 次以上压缩成 2 次（抑制幻觉式重复）
     text = re.sub(r"(.)\1{3,}", r"\1\1", text)
+    # 2~8 字的短语连续重复 3 次以上压成 2 次（抑制「はっはっはっ」「ここだここだ」式幻觉）
+    text = re.sub(r"(.{2,8}?)\1{2,}", r"\1\1", text)
     # 去除乱码
     text = re.sub(r"[�]", "", text)
     # 多个空白合并成一个
@@ -65,8 +67,12 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-def _flush(words: list[Word]) -> Sentence | None:
-    """把单词缓冲区合并成一条字幕（一个句子）。"""
+def _flush(words: list[Word], max_duration: float | None = None) -> Sentence | None:
+    """把单词缓冲区合并成一条字幕（一个句子）。
+
+    max_duration 非 None 时，对超过该时长的句子做硬钳制（end = start + max_duration），
+    兜底那些词级时间戳缺失、导致前面断句规则失效而拉得过长的句子。
+    """
     if not words:
         return None
     start = words[0]["timestamp"][0]
@@ -78,6 +84,8 @@ def _flush(words: list[Word]) -> Sentence | None:
         start = 0.0
     if end is None or end <= start:
         end = start + 0.5
+    if max_duration is not None and (end - start) > max_duration:
+        end = start + max_duration
     return {"start": start, "end": end, "text": text}
 
 
@@ -104,42 +112,68 @@ def segment_sentences(
     """
     sentences: list[Sentence] = []
     buf: list[Word] = []
+    # 缓冲区内最后一个已知的 end（应对词级时间戳缺失：Whisper 常吐 None）
+    last_known_end: float | None = None
+    # 缓冲区内第一个已知的 start
+    first_known_start: float | None = None
 
     for w in words:
         ts = w.get("timestamp") or (None, None)
         start = ts[0]
         # 停顿过长时，在当前单词之前断句
         if buf:
-            prev_end = buf[-1]["timestamp"][1]
+            prev_end = last_known_end
             if start is not None and prev_end is not None and (start - prev_end) > max_gap:
-                if (sent := _flush(buf)) is not None:
+                if (sent := _flush(buf, max_duration)) is not None:
                     sentences.append(sent)
                 buf = []
+                last_known_end = None
+                first_known_start = None
 
         buf.append(w)
+        if start is not None and first_known_start is None:
+            first_known_start = start
+        if ts[1] is not None:
+            last_known_end = ts[1]
         joined = "".join(x["text"] for x in buf).strip()
 
         # 遇到句末标点，句子完结
         if joined.endswith(SENTENCE_ENDINGS):
-            if (sent := _flush(buf)) is not None:
+            if (sent := _flush(buf, max_duration)) is not None:
                 sentences.append(sent)
             buf = []
+            last_known_end = None
+            first_known_start = None
             continue
 
         # 超过上限：若有逗号则在逗号处切开，剩余部分留到下一句
+        # 用「最后已知 end - 第一个已知 start」估算时长，不依赖当前词的时间戳
         duration = 0.0
-        first_start = buf[0]["timestamp"][0]
-        if start is not None and first_start is not None:
-            duration = (ts[1] or start) - first_start
+        if last_known_end is not None and first_known_start is not None:
+            duration = last_known_end - first_known_start
         if len(joined) >= max_chars or duration >= max_duration:
             split_at = _last_soft_break(buf)
-            head = buf[: split_at + 1] if split_at is not None else buf
-            tail = buf[split_at + 1 :] if split_at is not None else []
-            if (sent := _flush(head)) is not None:
+            if split_at is not None:
+                head = buf[: split_at + 1]
+                tail = buf[split_at + 1 :]
+            else:
+                # 没有逗号可切：按词边界硬切，避免整段被 flush 成一条超长字幕
+                head = buf
+                tail = []
+            if (sent := _flush(head, max_duration)) is not None:
                 sentences.append(sent)
             buf = tail
+            # 重算尾部的时间戳基准
+            last_known_end = next(
+                (t[1] for tw in reversed(tail) if (t := tw["timestamp"])[1] is not None),
+                None,
+            )
+            first_known_start = next(
+                (t[0] for tw in tail if (t := tw["timestamp"])[0] is not None),
+                None,
+            )
 
-    if (sent := _flush(buf)) is not None:
+    if (sent := _flush(buf, max_duration)) is not None:
         sentences.append(sent)
     return sentences
 
