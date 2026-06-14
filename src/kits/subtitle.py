@@ -160,6 +160,46 @@ def write_srt(sentences: list[Sentence], output_file: str) -> None:
         f.write(sentences_to_srt(sentences))
 
 
+class SrtWriter:
+    """增量 SRT 写入器：维护全局递增序号，分批追加写盘。
+
+    用于分段转录场景——每段转完即把该段句子追加进同一个 SRT 文件，
+    序号跨段连续，中途中断时已写入的部分仍是合法 SRT。
+    """
+
+    def __init__(self, output_file: str):
+        self.output_file = output_file
+        self._index = 0
+        # 开始时清空/创建文件
+        self._fh = open(output_file, "w", encoding="utf-8")
+
+    def append(self, sentences: list[Sentence]) -> int:
+        """追加一批句子，返回累计已写入条数。"""
+        for sent in sentences:
+            self._index += 1
+            start = seconds_to_srt_time(sent["start"])
+            end = seconds_to_srt_time(sent["end"])
+            # 每块之间用空行分隔；第一块前不需要
+            prefix = "" if self._index == 1 else "\n"
+            self._fh.write(f"{prefix}{self._index}\n{start} --> {end}\n{sent['text']}\n")
+        self._fh.flush()
+        return self._index
+
+    @property
+    def count(self) -> int:
+        """已写入的字幕条数。"""
+        return self._index
+
+    def close(self) -> None:
+        self._fh.close()
+
+    def __enter__(self) -> SrtWriter:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
 # 匹配 SRT 时间轴行： 00:00:00,000 --> 00:00:02,600
 _SRT_TIME_LINE = re.compile(
     r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})"

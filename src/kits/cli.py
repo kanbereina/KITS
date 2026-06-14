@@ -12,7 +12,13 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from kits.subtitle import Sentence, parse_srt, segment_sentences, write_srt
+from kits.subtitle import (
+    Sentence,
+    SrtWriter,
+    parse_srt,
+    segment_sentences,
+    write_srt,
+)
 
 
 def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
@@ -22,6 +28,11 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-gap", type=float, default=0.7, help="判定断句的最大停顿(秒)")
     parser.add_argument("--max-chars", type=int, default=60, help="单条字幕最大字符数")
     parser.add_argument("--max-duration", type=float, default=15.0, help="单条字幕最大时长(秒)")
+    # 长音频分段转录（按静音切分）。短音频会自动整段转录。
+    parser.add_argument("--target-chunk", type=float, default=300.0, help="分段目标时长(秒)")
+    parser.add_argument("--max-chunk", type=float, default=600.0, help="单段硬上限时长(秒)")
+    parser.add_argument("--silence-db", type=float, default=-30.0, help="静音判定响度阈值(dB)")
+    parser.add_argument("--min-silence", type=float, default=0.5, help="最短静音时长(秒)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,23 +73,45 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) -> list[Sentence]:
-    """转录音频并写出 SRT。延迟导入 transcriber 以避免无谓加载 GPU 栈。"""
+    """转录音频并写出 SRT。延迟导入 transcriber 以避免无谓加载 GPU 栈。
+
+    长音频按静音切分、分段转录，每段转完即断句并追加写盘（边转边出、可显示进度，
+    中途中断时已写部分仍是合法 SRT）。切点落在静音处，不打断语句。
+    """
     from kits.transcriber import Transcriber
 
-    words = Transcriber().transcribe(audio_file, language=args.language, beams=args.beams)
+    transcriber = Transcriber()
+    all_sentences: list[Sentence] = []
 
     print("\n" + "=" * 60)
-    print("🎬 生成 SRT 字幕")
+    print("🎬 分段转录 + 生成 SRT 字幕")
     print("=" * 60)
-    sentences = segment_sentences(
-        words,
-        max_gap=args.max_gap,
-        max_chars=args.max_chars,
-        max_duration=args.max_duration,
-    )
-    write_srt(sentences, output_srt)
-    _print_preview(sentences, output_srt)
-    return sentences
+
+    with SrtWriter(output_srt) as writer:
+        segments_words = transcriber.transcribe_segmented(
+            audio_file,
+            language=args.language,
+            beams=args.beams,
+            target_chunk=args.target_chunk,
+            max_chunk=args.max_chunk,
+            noise_db=args.silence_db,
+            min_silence=args.min_silence,
+        )
+        for words in segments_words:
+            sentences = segment_sentences(
+                words,
+                max_gap=args.max_gap,
+                max_chars=args.max_chars,
+                max_duration=args.max_duration,
+            )
+            total = writer.append(sentences)
+            all_sentences.extend(sentences)
+            print(f"  ✍️  已写入 {len(sentences)} 条，累计 {total} 条 -> {output_srt}")
+
+    if not all_sentences:
+        raise RuntimeError("未获取到任何字幕内容")
+    _print_preview(all_sentences, output_srt)
+    return all_sentences
 
 
 def _print_preview(sentences: list[Sentence], output_srt: str) -> None:
