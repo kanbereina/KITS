@@ -20,10 +20,19 @@ class TestParseUrlPattern:
         base, num, ext = parse_url_pattern("https://x.com/chunked/0.ts")
         assert num == 0
 
-    def test_raises_on_invalid_url(self):
-        with pytest.raises(ValueError):
-            parse_url_pattern("https://example.com/not-a-chunk.mp4")
+    def test_parses_quality_dir_other_than_chunked(self):
+        # 分片目录名随画质变化，160p30 / 720p60 等都要能解析
+        base, num, ext = parse_url_pattern(
+            "https://d3vd9lfkzbru3h.cloudfront.net/abc_kanotic_123/160p30/3.ts"
+        )
+        assert base == "https://d3vd9lfkzbru3h.cloudfront.net/abc_kanotic_123/160p30/"
+        assert num == 3
+        assert ext == ".ts"
 
-    def test_raises_without_chunked_segment(self):
+    def test_raises_on_non_ts_extension(self):
         with pytest.raises(ValueError):
-            parse_url_pattern("https://example.com/video/1710.ts")
+            parse_url_pattern("https://example.com/chunked/1710.mp4")
+
+    def test_raises_on_non_numeric_filename(self):
+        with pytest.raises(ValueError):
+            parse_url_pattern("https://example.com/chunked/playlist.ts")

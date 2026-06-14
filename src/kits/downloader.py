@@ -14,8 +14,10 @@ from pathlib import Path
 
 import httpx
 
-# 从形如 https://.../chunked/1710.ts 的 URL 中拆出 (基础URL, 编号, 扩展名)
-_URL_PATTERN = re.compile(r"(.+/chunked/)(\d+)(\.ts)")
+# 从形如 https://.../chunked/1710.ts 或 https://.../160p30/3.ts 的 URL 中
+# 拆出 (基础URL, 编号, 扩展名)。分片目录名随画质而变（chunked / 160p30 / 720p60 等），
+# 故只认「末段目录 + 纯数字文件名 + .ts」，不写死目录名。
+_URL_PATTERN = re.compile(r"(.+/)(\d+)(\.ts)$")
 
 _HEADERS = {
     "referer": "https://www.twitch.tv/",
