@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from kits.subtitle import (
+    SrtWriter,
     Word,
     clean_text,
     parse_srt,
@@ -237,3 +238,47 @@ class TestParseSrt:
 
     def test_empty_input(self):
         assert parse_srt("") == []
+
+
+class TestSrtWriter:
+    def test_single_batch_matches_write_srt(self, tmp_path):
+        # 单批追加的结果应与一次性 write_srt 完全一致
+        sentences = [
+            {"start": 0.0, "end": 2.6, "text": "こんにちは。"},
+            {"start": 5.0, "end": 6.8, "text": "ありがとう"},
+        ]
+        out = tmp_path / "incr.srt"
+        with SrtWriter(str(out)) as w:
+            w.append(sentences)
+        assert out.read_text(encoding="utf-8") == sentences_to_srt(sentences)
+
+    def test_multiple_batches_continuous_index(self, tmp_path):
+        # 跨批序号连续，且可被 parse_srt 还原
+        out = tmp_path / "incr.srt"
+        with SrtWriter(str(out)) as w:
+            n1 = w.append([{"start": 0.0, "end": 1.0, "text": "一"}])
+            n2 = w.append([
+                {"start": 2.0, "end": 3.0, "text": "二"},
+                {"start": 4.0, "end": 5.0, "text": "三"},
+            ])
+        assert n1 == 1
+        assert n2 == 3
+        parsed = parse_srt(out.read_text(encoding="utf-8"))
+        assert [s["text"] for s in parsed] == ["一", "二", "三"]
+
+    def test_count_property(self, tmp_path):
+        out = tmp_path / "incr.srt"
+        with SrtWriter(str(out)) as w:
+            assert w.count == 0
+            w.append([{"start": 0.0, "end": 1.0, "text": "x"}])
+            assert w.count == 1
+
+    def test_partial_output_is_valid_srt(self, tmp_path):
+        # 模拟中途中断：只写了一批就 close，剩下的文件仍可解析
+        out = tmp_path / "incr.srt"
+        w = SrtWriter(str(out))
+        w.append([{"start": 0.0, "end": 1.0, "text": "已完成"}])
+        w.close()
+        parsed = parse_srt(out.read_text(encoding="utf-8"))
+        assert len(parsed) == 1
+        assert parsed[0]["text"] == "已完成"

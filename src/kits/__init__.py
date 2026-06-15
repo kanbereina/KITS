@@ -5,6 +5,7 @@
 
 from kits.subtitle import (
     Sentence,
+    SrtWriter,
     Word,
     clean_text,
     parse_srt,
@@ -17,6 +18,7 @@ from kits.subtitle import (
 
 __all__ = [
     "Sentence",
+    "SrtWriter",
     "Word",
     "clean_text",
     "parse_srt",
