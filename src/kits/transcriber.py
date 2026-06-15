@@ -181,9 +181,12 @@ class Transcriber:
         self._pipe = pipeline(
             "automatic-speech-recognition",
             model=self.model_id,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,  # 沿用前面的精度设置（GPU 用 float16，CPU 用 float32）
             device=self.device,
-            chunk_length_s=30,
-            stride_length_s=(5, 3),
+            chunk_length_s=15,
+            model_kwargs = {"attn_implementation": "sdpa"} if torch.cuda.is_available() else {},  # 传入注意力实现配置（GPU 时启用 sdpa）
+            batch_size=8,  # 批处理大小=8，表示一次性处理 8 个音频文件/片段（提高吞吐量）
+            stride_length_s=(5, 3),  # 处理长音频的参数，表示滑动窗口的步长策略
         )
         print("✅ 模型加载完成")
 
@@ -205,8 +208,8 @@ class Transcriber:
             audio_file,
             return_timestamps=True,
             generate_kwargs={
-                "language": language,
-                "task": "transcribe",
+                # "language": language,
+                # "task": "transcribe",
                 "num_beams": beams,
                 # 抑制相同 n-gram 的无限循环（幻觉）
                 "no_repeat_ngram_size": 3,
@@ -218,7 +221,7 @@ class Transcriber:
         self,
         audio_file: str,
         language: str = "japanese",
-        beams: int = 1,
+        beams: int = 3,
     ) -> list[Word]:
         """转录整个音频，一次性返回词级时间戳列表（不分段）。"""
         if self._pipe is None:
@@ -237,7 +240,7 @@ class Transcriber:
         self,
         audio_file: str,
         language: str = "japanese",
-        beams: int = 1,
+        beams: int = 3,
         target_chunk: float = 300.0,
         max_chunk: float = 600.0,
         noise_db: float = -30.0,
