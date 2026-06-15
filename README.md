@@ -8,6 +8,7 @@
 - 🎵 可选提取 MP3 音频，可选保留 / 清理临时 TS 文件
 - 🎤 使用 Whisper large-v3-turbo 进行语音识别，速度快、精度高
 - ✂️ **单词级时间戳**断句，按句末标点 / 停顿 / 长度上限智能切分，保证句子完整不被拦腰截断
+- 🪓 长音频**按静音切分、分段流式转录**：实时进度、边转边写盘，切点落在无人说话处，精度不受影响
 - 🔗 下载与字幕一条龙：一条命令从直播 URL 直达 SRT 字幕
 - 🌐 调用 DeepSeek 把日语 SRT 翻译成中文 SRT，逐条对应、保留原时间轴
 - 🧹 自动清理重复字符与乱码，并抑制模型的幻觉式重复
@@ -90,6 +91,22 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | `--max-gap` | `0.7` | 判定断句的最大停顿（秒），越小切得越碎 |
 | `--max-chars` | `60` | 单条字幕最大字符数 |
 | `--max-duration` | `15.0` | 单条字幕最大时长（秒） |
+| `--target-chunk` | `300.0` | 分段目标时长（秒），长音频每段约这么长 |
+| `--max-chunk` | `600.0` | 单段硬上限（秒），段内无静音时在此强切 |
+| `--silence-db` | `-30.0` | 静音判定响度阈值（dB），越负越宽松 |
+| `--min-silence` | `0.5` | 最短静音时长（秒），短于此不算切点 |
+
+#### 长音频分段转录
+
+音频时长超过 `--max-chunk`（默认 10 分钟）时，会自动启用分段转录：
+
+1. 先用 ffmpeg `silencedetect` 探测全部静音区间
+2. 从每段起点出发累积到 `--target-chunk`（默认 5 分钟），在其后**第一个静音中点**处切开；若到 `--max-chunk` 仍无静音可切（如长时间唱歌 / BGM），则在硬上限处强切兜底
+3. 逐段切出临时音频 → 转录 → 该段字幕**立即追加写入 SRT**
+
+好处：实时显示 `转录第 i/N 段` 进度、边转边落盘（中途中断已转部分仍是合法 SRT）、峰值显存更低。切点都落在无人说话处，**不会把句子拦腰截断，精度与整段转录一致**。短音频则自动整段转录，无额外开销。
+
+> 鹿乃直播常有唱歌 / BGM，这些不是静音，若某段一直有声音会触发硬上限强切。可调大 `--silence-db`（如 `-35`）放宽静音判定，或调大 `--max-chunk` 容忍更长的段。
 
 ### translate：日语字幕译中文
 
@@ -134,8 +151,8 @@ uv run kits subtitle -i talk.mp3 --language english
 ```
 src/kits/
   __init__.py      # 包入口，导出字幕相关 API
-  subtitle.py      # 纯逻辑：单词时间戳 -> 完整句子 -> SRT，含 SRT 解析（无 torch 依赖，可单测）
-  transcriber.py   # Whisper 模型加载 + GPU 转录，产出单词级时间戳
+  subtitle.py      # 纯逻辑：单词时间戳 -> 完整句子 -> SRT，含 SRT 解析与增量写入（无 torch 依赖，可单测）
+  transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按静音切分、分段流式产出词级时间戳
   downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
   translator.py    # 调用 DeepSeek 把日语 SRT 翻译成中文 SRT（仅依赖 httpx）
   cli.py           # 命令行入口（download / subtitle / translate 子命令）
@@ -145,8 +162,8 @@ main.py            # 薄入口，委托给 kits.cli
 各模块职责清晰、相互解耦:
 
 - `downloader.TwitchDownloader` 下载并合并直播，产出 MP4 / MP3，不依赖 torch
-- `transcriber.Transcriber.transcribe()` 把音频转成单词级时间戳列表
-- `subtitle.segment_sentences()` 负责断句、`write_srt()` 负责落盘、`parse_srt()` 负责把 SRT 读回句子列表
+- `transcriber.Transcriber.transcribe()` 把音频转成单词级时间戳列表；`transcribe_segmented()` 按静音切分长音频、分段流式产出
+- `subtitle.segment_sentences()` 负责断句、`write_srt()` / `SrtWriter` 负责落盘（后者支持分段增量写）、`parse_srt()` 负责把 SRT 读回句子列表
 - `translator.DeepSeekTranslator.translate()` 把句子列表逐批译成中文，仅依赖 httpx
 - `cli` 把它们串成流水线：`download --srt` 即「下载 -> 提取音频 -> 转字幕」
 
