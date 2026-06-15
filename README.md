@@ -1,13 +1,14 @@
 # KITS
 
-基于 [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) 的鹿乃 Twitch 直播总结工具。可以**下载 Twitch 直播**、合并为 MP4 / 提取 MP3，把音频转换成**完整句子、带时间戳的 SRT 字幕文件**，并可调用 **DeepSeek 把日语字幕翻译成中文**。支持 50 系 Nvidia 显卡（CUDA 12.8）。
+基于 [kotoba-whisper-v2.2](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.2) 的鹿乃 Twitch 直播工具。可以**下载 Twitch 直播**、合并为 MP4 / 提取 MP3，把音频转换成**完整句子、带时间戳的 SRT 字幕文件**，可调用 **DeepSeek 把日语字幕翻译成中文**、对字幕做 **AI 总结**，还支持**分离人声**。支持 50 系 Nvidia 显卡（CUDA 12.8）。
 
 ## 特性
 
 - 🐙 异步并发下载 Twitch 直播 TS 分片，自动探测视频长度，合并为 MP4
 - 🎵 可选提取 MP3 音频，可选保留 / 清理临时 TS 文件
-- 🎤 使用 Whisper large-v3-turbo 进行语音识别，速度快、精度高
-- ✂️ **单词级时间戳**断句，按句末标点 / 停顿 / 长度上限智能切分，保证句子完整不被拦腰截断
+- 🎤 使用 Whisper 进行语音识别，默认 `kotoba-whisper-v2.2`（日语识别更准的蒸馏模型）
+- ✂️ 句子级断句，按句末标点 / 停顿 / 长度上限智能切分，保证句子完整不被拦腰截断
+- ✒️ 蒸馏模型只产短语级时间戳且不带标点，自动用标点模型补日语句读（。！？）后再断句，时间戳原样保留
 - 🪓 长音频**按静音切分、分段流式转录**：实时进度、边转边写盘，切点落在无人说话处，精度不受影响
 - 🔗 下载与字幕一条龙：一条命令从直播 URL 直达 SRT 字幕
 - 🌐 调用 DeepSeek 把日语 SRT 翻译成中文 SRT，逐条对应、保留原时间轴
@@ -24,6 +25,7 @@
 - CUDA 12.8（PyTorch 从 `pytorch-cu128` 源安装）
 - [ffmpeg](https://ffmpeg.org/download.html)（合并 MP4、提取 MP3 需要，须在 PATH 中）
 - [audio-separator](https://github.com/nomadkaraoke/python-audio-separator)（人声分离用，已在依赖中随 `uv sync` 安装，含 onnxruntime-gpu）
+- [punctuators](https://github.com/1-800-BAD-CODE/punctuators)（标点恢复用，已在依赖中随 `uv sync` 安装）
 - 已安装 [uv](https://docs.astral.sh/uv/)
 
 ## 安装
@@ -102,6 +104,24 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | `--filter-game` | 关闭 | 剔除指定游戏的播报 / 技能语音，按游戏名启用、可多次指定（整条完全匹配才删） |
 | `--separate` | 关闭 | 转录前先用 audio-separator 分离人声（去 BGM / 唱歌干扰，需安装 audio-separator + GPU） |
 | `--separate-model` | BS-Roformer | 人声分离模型文件名，仅在 `--separate` 时生效 |
+| `--no-punctuate` | （默认补标点） | 关闭标点恢复；模型本身已输出标点时可关 |
+| `--punct-model` | xlm-roberta 日语句读 | 标点恢复模型 |
+
+#### 标点恢复（默认开启）
+
+默认模型 `kotoba-whisper-v2.2` 是蒸馏模型，日语识别更准，但只产出**短语级时间戳且不带句末标点**。无标点会让断句只能靠长度上限硬切，字幕被压成一条条 15 秒的长块。
+
+为此转录后会自动用标点模型（kotoba 官方同款 [xlm-roberta 日语句读模型](https://huggingface.co/1-800-BAD-CODE/xlm-roberta_punctuation_fullstop_truecase)）给每个短语补上 `。！？、`，**时间戳原样保留**，让断句在句末标点处自然切开。实测一段 120 秒音频，补标点后字幕从 7 条细化到 19 条、被硬切的从 5 条降到 2 条。
+
+```bash
+# 默认补标点，无需额外参数
+uv run kits subtitle -i live.mp3
+
+# 若换用本身已带标点的模型，可关闭标点恢复
+uv run kits subtitle -i live.mp3 --no-punctuate
+```
+
+首次运行会下载标点模型（约 1GB）。标点模型在 CPU 上即可快速推理。
 
 #### 长音频分段转录
 
@@ -257,7 +277,8 @@ src/kits/
   subtitle.py      # 纯逻辑：单词时间戳 -> 完整句子 -> SRT，含 SRT 解析与增量写入（无 torch 依赖，可单测）
   filters.py       # 纯逻辑：剔除游戏内系统播报 / 技能语音（无 torch 依赖，可单测）
   deepseek.py      # 公共 DeepSeek 客户端：鉴权 + HTTP + 错误处理（仅 httpx，translate/sum 共用）
-  transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按静音切分、分段流式产出词级时间戳
+  transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按静音切分、分段流式产出 chunk 级时间戳
+  punctuator.py    # 标点恢复：给无标点的转录 chunk 补日语句读（延迟导入 punctuators），时间戳不变
   downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
   translator.py    # 调用 DeepSeek 把日语 SRT 翻译成中文 SRT（经 deepseek 客户端）
   separator.py     # 人声分离：封装 audio-separator（延迟导入，默认只出 Vocals 轨）
@@ -270,7 +291,8 @@ main.py            # 薄入口，委托给 kits.cli
 各模块职责清晰、相互解耦:
 
 - `downloader.TwitchDownloader` 下载并合并直播，产出 MP4 / MP3，不依赖 torch
-- `transcriber.Transcriber.transcribe()` 把音频转成单词级时间戳列表；`transcribe_segmented()` 按静音切分长音频、分段流式产出
+- `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；`transcribe_segmented()` 按静音切分长音频、分段流式产出
+- `punctuator.Punctuator.restore()` 给无标点的 chunk 补日语句读，时间戳不变（延迟导入重依赖）
 - `subtitle.segment_sentences()` 负责断句、`write_srt()` / `SrtWriter` 负责落盘（后者支持分段增量写）、`parse_srt()` 负责把 SRT 读回句子列表
 - `deepseek.DeepSeekClient` 集中 DeepSeek 鉴权与请求；`translator.DeepSeekTranslator` 与 `summarizer.Summarizer` 复用它
 - `separator.VocalSeparator.separate()` 用 audio-separator 分离人声（延迟导入重依赖）
@@ -281,8 +303,8 @@ main.py            # 薄入口，委托给 kits.cli
 
 字幕按以下优先级切分句子，确保完整性:
 
-1. **句末标点**：遇到 `。！？」` 等结尾标点即认为一句结束
-2. **停顿**：与上一个词的间隔超过 `--max-gap` 时断句
+1. **句末标点**：遇到 `。！？」` 等结尾标点即认为一句结束（蒸馏模型无标点时，先经标点恢复补上）
+2. **停顿**：与上一段的间隔超过 `--max-gap` 时断句
 3. **长度上限**：超过 `--max-chars` 或 `--max-duration` 时，优先在逗号/读点处切开，避免单条字幕过长
 
 ## 支持的音频格式

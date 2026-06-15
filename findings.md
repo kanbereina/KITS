@@ -49,9 +49,24 @@
 ## 资源
 - DeepSeek API: https://api.deepseek.com/chat/completions（现有 translator 已用）
 
-## 视觉/浏览器发现
-<!-- 每执行2次查看/搜索操作后更新此部分 -->
--
+## kotoba-whisper-v2.2 适配 + 标点恢复（阶段 6，外部内容仅记此处）
+- 崩溃根因：模型 config decoder_layers=2 / encoder_layers=32，但 generation_config.json
+  的 alignment_heads = [[7,0],[10,17],...,[25,6]]（继承自 large-v3，max 层=25）。
+  return_timestamps="word" → _extract_token_timestamps 执行 cross_attentions[l][:,h]，
+  l 取 7..25 而 cross_attentions 只有 2 层 → IndexError。
+- 修复：_transcribe_file 改 return_timestamps=True（chunk/短语级，不走 alignment_heads）。
+  chunk 结构 {"text", "timestamp": (start,end)}，兼容 Word 契约，segment_sentences 不改。
+- 实测代价（120s VALORANT 音频）：chunk 无句末标点、时间戳连续 → 标点/停顿断句失效，
+  7 条里 5 条被 max_duration=15 硬钳，时间轴压缩、有重复文本。
+- 官方 kotoba_whisper.py 的标点方案（README/源码）：
+  - `from punctuators.models import PunctCapSegModelONNX`
+  - 模型 `1-800-BAD-CODE/xlm-roberta_punctuation_fullstop_truecase`
+  - `Punctuator.punctuate(text)`：若文本已含 !?、。则原样返回；否则
+    `"".join(model.infer([text])[0])`；结果含 'unk' 则回退原文
+  - 官方对「按说话人聚合的整段文本」标点化，丢时间戳 → 不适合 SRT
+- 本项目方案：逐 chunk 批量标点化（infer 支持 batch），时间戳不动，
+  让 segment_sentences 在 chunk 边界靠标点断句。待实测确认 infer 只插标点不乱改字。
+- 用户动机：选 kotoba 是因日语识别更准 → 值得加适配，不回退原版。
 
 ---
 *每执行2次查看/浏览器/搜索操作后更新此文件*

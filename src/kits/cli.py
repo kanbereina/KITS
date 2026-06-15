@@ -53,6 +53,18 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="人声分离模型文件名(默认 BS-Roformer)，仅在 --separate 时生效",
     )
+    # 标点恢复（蒸馏模型 chunk 无标点时靠它断句）。默认开启。
+    parser.add_argument(
+        "--no-punctuate",
+        dest="punctuate",
+        action="store_false",
+        help="关闭标点恢复（默认开启；模型本身已输出标点时可关）",
+    )
+    parser.add_argument(
+        "--punct-model",
+        default=None,
+        help="标点恢复模型(默认 xlm-roberta 日语句读模型)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -166,6 +178,17 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
         callouts = resolve_games(args.filter_game)
         print(f"🎮 已启用游戏播报过滤: {', '.join(args.filter_game)}")
 
+    # 标点恢复器：蒸馏模型（如 kotoba）产出的 chunk 无句末标点，补标点后才能断句。
+    # 默认开启，可用 --no-punctuate 关闭。提前实例化，整场复用一个模型。
+    punctuator = None
+    if getattr(args, "punctuate", True):
+        from kits.punctuator import Punctuator
+
+        kwargs: dict = {}
+        if getattr(args, "punct_model", None):
+            kwargs["model"] = args.punct_model
+        punctuator = Punctuator(**kwargs)
+
     print("\n" + "=" * 60)
     print("🎬 分段转录 + 生成 SRT 字幕")
     print("=" * 60)
@@ -181,6 +204,9 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
             min_silence=args.min_silence,
         )
         for words in segments_words:
+            # 转录后、断句前补标点（时间戳不变），让 segment_sentences 能在句末标点处断句
+            if punctuator is not None:
+                words = punctuator.restore(words)
             sentences = segment_sentences(
                 words,
                 max_gap=args.max_gap,

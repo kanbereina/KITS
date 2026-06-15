@@ -29,6 +29,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 
 - PyTorch 从自定义索引 `pytorch-cu128`（CUDA 12.8）安装，见 `pyproject.toml` 的 `[tool.uv.sources]`。不要把 torch 换成 PyPI 默认源。
 - 转录（`subtitle` / `download --srt`）强制要求可用的 CUDA GPU，CPU 环境会直接抛错。
+- 默认模型 `kotoba-tech/kotoba-whisper-v2.2`（日语识别更准的蒸馏模型）。它只产 chunk 级时间戳、不带句末标点，故转录后默认走 `punctuator` 标点恢复再断句（`--no-punctuate` 关闭）。换用本身带 word 级时间戳 + 标点的模型时可关。
 - 合并 MP4、提取 MP3 依赖系统 `ffmpeg`，须在 PATH 中。
 - `translate` / `sum` 需要 DeepSeek API Key，走 `--api-key` 或环境变量 `DEEPSEEK_API_KEY`。
 - `separate` 依赖 `audio-separator[gpu]`（含 onnxruntime-gpu），首次运行会下载分离模型；同样要 CUDA GPU。
@@ -40,7 +41,8 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - `subtitle.py` — 纯函数库，**不依赖 torch/网络**，可独立单测。负责单词级时间戳 → 完整句子的断句、SRT 渲染、SRT 解析（`parse_srt` / `srt_time_to_seconds`），以及增量写入器 `SrtWriter`（分段转录时序号跨段连续、逐段 flush 落盘）。`Word` / `Sentence` 是贯穿全项目的 TypedDict 数据契约。
 - `filters.py` — 纯函数库，剔除游戏内系统播报 / 技能语音（整条完全匹配）。
 - `deepseek.py` — **公共 DeepSeek 客户端**，仅依赖 httpx。封装 API Key 解析（参数优先于 `DEEPSEEK_API_KEY`）、`chat()` 单次请求、错误处理（`DeepSeekError`）。`translator` 与 `summarizer` 共用，批处理 / map-reduce 等领域策略留各自模块。
-- `transcriber.py` — 封装 Whisper pipeline 的加载与转录。`transcribe()` 整段转；`transcribe_segmented()` 按静音切分长音频后分段流式产出（生成器）。依赖 torch/transformers，静音探测与切分依赖 ffmpeg/ffprobe。
+- `transcriber.py` — 封装 Whisper pipeline 的加载与转录。`transcribe()` 整段转；`transcribe_segmented()` 按静音切分长音频后分段流式产出（生成器）。依赖 torch/transformers，静音探测与切分依赖 ffmpeg/ffprobe。**时间戳粒度**：用 `return_timestamps=True`（chunk/短语级），不用 `"word"`——因 kotoba 等蒸馏模型解码器仅 2 层，但其 alignment_heads 继承自 large-v3（引用第 25 层），抽词级时间戳会 `IndexError`。chunk 结构同为 `{"text", "timestamp": (start, end)}`，兼容 `Word` 契约。
+- `punctuator.py` — `Punctuator`，给无标点的转录 chunk 批量补日语句读（。！？），**时间戳原样保留**。复用 kotoba 官方同款标点模型（punctuators 库 `PunctCapSegModelONNX`）。蒸馏模型 chunk 不带句末标点会使 `segment_sentences` 的标点断句失效，补标点后才能在 chunk 边界正常断句。重依赖 punctuators（ONNX），**延迟导入**。
 - `downloader.py` — `TwitchDownloader`，异步下载 TS 分片 → ffmpeg 合并 MP4 → 可选提取 MP3。仅依赖 httpx + ffmpeg，**不依赖 torch**。
 - `translator.py` — `DeepSeekTranslator`，经 `deepseek.DeepSeekClient` 把日语句子逐批译成中文。`TranslationError` 继承 `DeepSeekError`（保留历史契约）。
 - `separator.py` — `VocalSeparator`，封装 audio-separator 分离人声（默认只出 Vocals 轨）。重依赖 audio-separator（含 torch/onnxruntime），**延迟导入**（`load()` 内才 import）。
@@ -50,14 +52,14 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 
 数据流：
 
-- 转字幕：`downloader`(MP3) →（可选 `separator` 分离人声）→ `transcriber.transcribe_segmented()`（按静音分段，逐段产出 list[Word]）→ 每段 `subtitle.segment_sentences()`(list[Sentence]) → `subtitle.SrtWriter.append()` 增量写盘。`_audio_to_srt` 是这条流水线，`_maybe_separate` 在转录前按 `--separate` 决定是否预处理。
+- 转字幕：`downloader`(MP3) →（可选 `separator` 分离人声）→ `transcriber.transcribe_segmented()`（按静音分段，逐段产出 chunk 级 list[Word]）→（可选 `punctuator.restore()` 补标点）→ 每段 `subtitle.segment_sentences()`(list[Sentence]) → `subtitle.SrtWriter.append()` 增量写盘。`_audio_to_srt` 是这条流水线，`_maybe_separate` 按 `--separate` 决定是否预处理人声，标点恢复默认开启（`--no-punctuate` 关闭）。
 - 译字幕：SRT 文件 → `subtitle.parse_srt()`(list[Sentence]) → `translator.translate()`(中文 list[Sentence]) → `subtitle.write_srt()`。
 - 分离人声：音频 → `separator.VocalSeparator.separate()` → 人声音频文件（可再交给 subtitle）。
 - 总结：SRT 文件 → `subtitle.parse_srt()` → `summarizer.format_sentences/chunk_sentences` → `summarizer.Summarizer.summarize()`（按预设逐块总结，多块再 reduce 合并）→ Markdown 文件。
 
 关键约定：
 
-- `cli.py` 中对 `transcriber` / `downloader` / `translator` / `separator` / `summarizer` 用**延迟导入**（函数内 import），避免无谓加载 GPU 栈或网络栈。新增重依赖模块时沿用此模式。
+- `cli.py` 中对 `transcriber` / `downloader` / `translator` / `separator` / `summarizer` / `punctuator` 用**延迟导入**（函数内 import），避免无谓加载 GPU 栈或网络栈。新增重依赖模块时沿用此模式。
 - DeepSeek 调用统一走 `deepseek.DeepSeekClient`，不要在 `translator` / `summarizer` 里重复写 HTTP / 鉴权。新增 DeepSeek 能力时复用该客户端，领域逻辑（分批、提示词）留各自模块。
 - `download --srt` 隐含 `--mp3`（生成字幕必须先有音频），逻辑在 `_run_download` 的 `need_mp3 = args.mp3 or args.srt`。
 - 断句与分段参数（`--max-gap` / `--target-chunk` 等）由 `_add_subtitle_args` 在 download / subtitle 间共用。

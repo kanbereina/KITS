@@ -6,7 +6,7 @@
 调用逻辑抽成公共客户端，保持现有分层（纯逻辑 / 重依赖解耦、延迟导入）与全部现有测试通过。
 
 ## 当前阶段
-全部完成 ✅
+全部完成 ✅（含阶段 6 kotoba 适配 + 标点恢复）
 
 ## 各阶段
 
@@ -64,3 +64,16 @@
 - 沿用现有约定：纯逻辑无 torch 依赖可单测；重依赖（torch/网络）走函数内延迟导入
 - 外部内容（网页/API 结果）只写入 findings.md，不写入本文件
 - 决策前重读本计划
+
+## 阶段 6：模型适配 kotoba-whisper-v2.2 + 标点恢复（2026-06-15 续）
+背景：用户为「日语识别更准」换用 kotoba-whisper-v2.2（蒸馏，2 层解码器）。
+- [x] 定位崩溃根因：alignment_heads 继承 large-v3（引用第 25 层）但模型仅 2 层 → word 级时间戳 IndexError
+- [x] 改 transcriber `_transcribe_file` 用 `return_timestamps=True`（chunk 级），崩溃消除、112 测试仍过
+- [x] 实测暴露代价：chunk 无句末标点 + 时间戳连续 → segment_sentences 标点/停顿规则失效，多条被 max_duration 硬切
+- [x] 用户决策：接入官方标点模型（punctuators / PunctCapSegModelONNX）恢复断句
+- [x] 装 punctuators 0.0.7，实测逐 chunk 批量标点化：infer 返回 list[list[str]]，质量好（。！？ 位置合理），副带 ・ 插入（无害）
+- [x] 新建 punctuator.py（重依赖，延迟导入）：restore(list[Word]) 批量补标点、时间戳不变，含 unk 回退 + 已标点跳过
+- [x] cli._audio_to_srt 在 segment_sentences 前接入标点恢复（延迟导入，整场复用一个模型）
+- [x] 加 --no-punctuate（默认开）/ --punct-model + 补 8 个纯逻辑单测（假模型替身）+ 跑全量 120 过 + 更新文档
+- [x] 端到端实测（120s）：补标点后字幕 7→19 条、被 15s 硬切 5→2 条，断句在句末标点处自然切开
+- **状态：** complete

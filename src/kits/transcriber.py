@@ -190,13 +190,20 @@ class Transcriber:
     def _transcribe_file(
         self, audio_file: str, language: str, beams: int
     ) -> list[Word]:
-        """转录单个音频文件，返回（相对该文件的）词级时间戳。内部方法。"""
+        """转录单个音频文件，返回（相对该文件的）词级时间戳。内部方法。
+
+        注意时间戳粒度：kotoba-whisper 等蒸馏模型解码器只有 2 层，但其
+        generation_config 的 alignment_heads 继承自原版 large-v3（引用到第 25 层），
+        用 return_timestamps="word" 抽词级时间戳会在 cross_attentions[l] 越界
+        （IndexError）。故这里用 return_timestamps=True 取 chunk（短语）级时间戳——
+        其结构同为 {"text", "timestamp": (start, end)}，兼容 Word 契约与 segment_sentences。
+        """
         if self._pipe is None:
             self.load()
         # noinspection PyTypeChecker
         result: dict = self._pipe(
             audio_file,
-            return_timestamps="word",
+            return_timestamps=True,
             generate_kwargs={
                 "language": language,
                 "task": "transcribe",

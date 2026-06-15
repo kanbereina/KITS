@@ -34,6 +34,23 @@
 - `--separate` 集成转录、`sum` 端到端（需 GPU / DeepSeek Key）
 - separator.py 用延迟导入 + 已按官方 API 写，单测验证了构造不触发重依赖导入
 
+## 阶段 6：kotoba 适配 + 标点恢复（2026-06-15 续）
+- 根因：kotoba-whisper-v2.2 decoder_layers=2，但 alignment_heads 继承 large-v3（引用第 25 层）→ word 级时间戳 IndexError
+- 改 transcriber `_transcribe_file` → `return_timestamps=True`（chunk 级），崩溃消除
+- 装 punctuators 0.0.7，新建 punctuator.py（Punctuator.restore 批量补标点、时间戳不变）
+- cli._audio_to_srt 在断句前接入标点恢复（默认开，--no-punctuate 关）
+
+| 测试 | 输入 | 预期结果 | 实际结果 | 状态 |
+|------|------|---------|---------|------|
+| chunk 级转录探针 | 60s 真实音频 | 不崩溃、结构兼容 Word | 7 chunk，结构 OK | ✅ |
+| punctuator API 探针 | 5 条真实 chunk 文本 | 合理补 。！？ | 质量好，副带 ・ | ✅ |
+| 端到端探针（标点前） | 120s 音频 | — | 7 条字幕，5 条被 15s 硬切 | 基线 |
+| 端到端探针（标点后） | 120s 音频 | 断句改善 | 19 条字幕，2 条被硬切 | ✅ |
+| test_punctuator.py | 假模型替身 | 纯逻辑全过 | 8 passed | ✅ |
+| 全量 pytest | 含标点测试 | 全过 | 120 passed | ✅ |
+| ruff check . | 全仓 | 无告警 | All checks passed | ✅ |
+| CLI --no-punctuate | 参数解析 | 默认 True，关后 False | 符合 | ✅ |
+
 ## 错误日志
 | 时间戳 | 错误 | 尝试次数 | 解决方案 |
 |--------|------|---------|---------|
