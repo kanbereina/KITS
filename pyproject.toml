@@ -1,6 +1,6 @@
 [project]
 name = "KITS"
-version = "0.3.0"
+version = "0.4.0"
 description = "基于 openai/whisper-large-v3-turbo 的鹿乃 Twitch 直播总结工具，支持 50 系 Nvidia 显卡"
 readme = "README.md"
 authors = [

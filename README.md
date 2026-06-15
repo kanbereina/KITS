@@ -12,6 +12,7 @@
 - 🔗 下载与字幕一条龙：一条命令从直播 URL 直达 SRT 字幕
 - 🌐 调用 DeepSeek 把日语 SRT 翻译成中文 SRT，逐条对应、保留原时间轴
 - 🧹 自动清理重复字符与乱码，并抑制模型的幻觉式重复
+- 🎮 可选剔除 VALORANT 游戏内系统播报 / 技能语音（如「残り1名」「グレネード配置」），让字幕聚焦主播人声
 - 📄 输出标准 SRT，可直接拖入播放器或视频剪辑软件
 
 ## 环境要求
@@ -95,6 +96,7 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | `--max-chunk` | `600.0` | 单段硬上限（秒），段内无静音时在此强切 |
 | `--silence-db` | `-30.0` | 静音判定响度阈值（dB），越负越宽松 |
 | `--min-silence` | `0.5` | 最短静音时长（秒），短于此不算切点 |
+| `--filter-game` | 关闭 | 剔除指定游戏的播报 / 技能语音，按游戏名启用、可多次指定（整条完全匹配才删） |
 
 #### 长音频分段转录
 
@@ -107,6 +109,29 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 好处：实时显示 `转录第 i/N 段` 进度、边转边落盘（中途中断已转部分仍是合法 SRT）、峰值显存更低。切点都落在无人说话处，**不会把句子拦腰截断，精度与整段转录一致**。短音频则自动整段转录，无额外开销。
 
 > 鹿乃直播常有唱歌 / BGM，这些不是静音，若某段一直有声音会触发硬上限强切。可调大 `--silence-db`（如 `-35`）放宽静音判定，或调大 `--max-chunk` 容忍更长的段。
+
+#### 剔除游戏播报（--filter-game）
+
+直播玩 VALORANT 时，麦克风会混入大量游戏音——系统播报（「残り1名」「ディフェンダーの勝利」）和特工技能语音（「アラームボット配置」「グレネード配置」）。这些不是主播说的话，对「直播字幕」是噪声，还会在后续翻译时白白消耗 token。用 `--filter-game` 指定游戏名即可剔除：
+
+```bash
+# 指定游戏名（大小写不敏感，支持简写 valo）
+uv run kits subtitle -i live.mp3 --filter-game valorant
+uv run kits subtitle -i live.mp3 --filter-game valo
+
+# 多款游戏可重复指定（词表合并）
+uv run kits subtitle -i live.mp3 --filter-game valorant --filter-game valo
+```
+
+目前内置词表：`valorant`（简写 `valo`）。传入未收录的游戏名会报错并列出当前支持的名字。
+
+采用**整条完全匹配**策略：仅当一条字幕（去空格、去首尾标点后）恰好等于内置词表中的某条播报词时才删除，最大限度避免误删主播人声。因此：
+
+- ✅ 整条纯播报（如 `セントリー設置`）会被删
+- ⚠️ 播报与人声混在同一条（如 `中央に敵だ…ご視聴ありがとうございました`）会**整条保留**
+- ⚠️ 词表未收录的转录变体可能漏删
+
+默认关闭，仅在玩对应游戏的场次按需开启。新增游戏只需在 `filters.py` 的 `GAME_CALLOUTS` / `_GAME_ALIASES` 登记词表与别名。
 
 ### translate：日语字幕译中文
 
@@ -142,6 +167,9 @@ uv run kits subtitle -i live_2026.mp3 -o live_2026.srt
 # 句子偏碎时，调大停顿阈值让句子更连贯
 uv run kits subtitle -i live_2026.mp3 --max-gap 1.0
 
+# 玩 VALORANT 的场次，剔除游戏系统播报 / 技能语音
+uv run kits subtitle -i live_2026.mp3 --filter-game valorant
+
 # 转录英语内容
 uv run kits subtitle -i talk.mp3 --language english
 ```
@@ -152,6 +180,7 @@ uv run kits subtitle -i talk.mp3 --language english
 src/kits/
   __init__.py      # 包入口，导出字幕相关 API
   subtitle.py      # 纯逻辑：单词时间戳 -> 完整句子 -> SRT，含 SRT 解析与增量写入（无 torch 依赖，可单测）
+  filters.py       # 纯逻辑：剔除游戏内系统播报 / 技能语音（无 torch 依赖，可单测）
   transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按静音切分、分段流式产出词级时间戳
   downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
   translator.py    # 调用 DeepSeek 把日语 SRT 翻译成中文 SRT（仅依赖 httpx）
