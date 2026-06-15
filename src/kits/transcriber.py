@@ -23,7 +23,7 @@ from transformers import pipeline
 
 from kits.subtitle import Word
 
-MODEL_ID = "openai/whisper-large-v3-turbo"
+MODEL_ID = "kotoba-tech/kotoba-whisper-v2.2"
 
 
 def _silence_warnings() -> None:
