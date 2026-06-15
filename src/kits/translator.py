@@ -1,20 +1,15 @@
 """字幕翻译：调用 DeepSeek API 把日语 SRT 翻译成中文 SRT。
 
-仅依赖 httpx，不引入 torch / transformers。
+仅依赖 httpx（经由 kits.deepseek 公共客户端），不引入 torch / transformers。
 消费 kits.subtitle 解析出的句子列表，逐批翻译后保持时间戳不变写回 SRT。
 """
 
 from __future__ import annotations
 
-import json
-import os
-
 import httpx
 
+from kits.deepseek import DEFAULT_MODEL, DeepSeekClient, DeepSeekError
 from kits.subtitle import Sentence
-
-DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
-DEFAULT_MODEL = "deepseek-chat"
 
 # 翻译系统提示：要求逐条对应、只输出译文、保持顺序与条数一致
 _SYSTEM_PROMPT = (
@@ -28,12 +23,13 @@ _SYSTEM_PROMPT = (
 )
 
 
-class TranslationError(RuntimeError):
+# 向后兼容：旧代码 / 测试可能仍 import TranslationError
+class TranslationError(DeepSeekError):
     """翻译过程中的错误（API 失败、响应解析失败等）。"""
 
 
 class DeepSeekTranslator:
-    """DeepSeek 字幕翻译器。按批调用 chat/completions 接口。"""
+    """DeepSeek 字幕翻译器。按批调用公共客户端的 chat 接口。"""
 
     def __init__(
         self,
@@ -42,42 +38,24 @@ class DeepSeekTranslator:
         batch_size: int = 20,
         timeout: float = 120.0,
     ):
-        key = api_key or os.environ.get("DEEPSEEK_API_KEY")
-        if not key:
-            raise TranslationError(
-                "缺少 DeepSeek API Key，请用 --api-key 传入或设置环境变量 DEEPSEEK_API_KEY"
-            )
-        self.api_key = key
-        self.model = model
-        self.batch_size = batch_size
-        self.timeout = timeout
-
-    def _request(self, client: httpx.Client, user_content: str) -> str:
-        resp = client.post(
-            DEEPSEEK_API_URL,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-                "temperature": 1.3,
-                "stream": False,
-            },
-        )
-        if resp.status_code != 200:
-            raise TranslationError(
-                f"DeepSeek API 返回 HTTP {resp.status_code}: {resp.text[:300]}"
-            )
         try:
-            data = resp.json()
-            return data["choices"][0]["message"]["content"]
-        except (json.JSONDecodeError, KeyError, IndexError) as e:
-            raise TranslationError(f"解析 DeepSeek 响应失败: {e}") from e
+            self._client = DeepSeekClient(api_key=api_key, model=model, timeout=timeout)
+        except DeepSeekError as e:
+            # 保持对外抛 TranslationError 的历史契约
+            raise TranslationError(str(e)) from e
+        self.batch_size = batch_size
+
+    @property
+    def api_key(self) -> str:
+        return self._client.api_key
+
+    @property
+    def model(self) -> str:
+        return self._client.model
+
+    @property
+    def timeout(self) -> float:
+        return self._client.timeout
 
     @staticmethod
     def _build_user_content(batch: list[Sentence]) -> str:
@@ -118,7 +96,12 @@ class DeepSeekTranslator:
                     f"🌐 翻译批次 {batch_no}/{batch_total} "
                     f"（{start + 1}-{start + len(batch)}/{total} 条）..."
                 )
-                content = self._request(client, self._build_user_content(batch))
+                content = self._client.chat(
+                    _SYSTEM_PROMPT,
+                    self._build_user_content(batch),
+                    temperature=1.3,
+                    client=client,
+                )
                 texts = self._parse_response(content, len(batch))
                 for sent, text in zip(batch, texts):
                     # 译文为空时回退到原文，宁可保留日语也不丢字幕
