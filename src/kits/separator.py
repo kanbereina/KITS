@@ -56,6 +56,28 @@ def _probe_duration(audio_file: str) -> float:
         return 0.0
 
 
+def _probe_bitrate(audio_file: str) -> int:
+    """用 ffprobe 取原音频比特率（bps）。失败返回 0。
+
+    优先取音频流比特率（精确，如 128000），它不含容器开销；取不到再回退到
+    format 整体比特率（MP3 等会比标称略高，如 129192，靠取整时的容差吸收）。
+    """
+    for args in (
+        ["-select_streams", "a:0", "-show_entries", "stream=bit_rate"],
+        ["-show_entries", "format=bit_rate"],
+    ):
+        cmd = ["ffprobe", "-v", "error", *args,
+               "-of", "default=noprint_wrappers=1:nokey=1", audio_file]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        try:
+            value = int(result.stdout.strip())
+            if value > 0:
+                return value
+        except ValueError:
+            continue
+    return 0
+
+
 def _slice_audio(audio_file: str, start: float, dur: float, out_path: Path) -> None:
     """切出 [start, start+dur] 区间到 out_path。
 
@@ -74,22 +96,50 @@ def _slice_audio(audio_file: str, start: float, dur: float, out_path: Path) -> N
         )
 
 
-def _concat_audio(parts: list[Path], out_path: Path) -> None:
-    """用 ffmpeg concat demuxer 把多段同格式人声音频按序无缝拼接成一个文件。"""
-    list_file = out_path.parent / "_concat_list.txt"
-    # concat demuxer 要求每行 file '绝对路径'，单引号内的单引号需转义
-    lines = [f"file '{p.resolve().as_posix()}'" for p in parts]
-    list_file.write_text("\n".join(lines), encoding="utf-8")
+def _encode_final(parts: list[Path], out_path: Path, bitrate: str | None) -> None:
+    """把一个或多个无损 WAV 分段编码为最终输出文件（格式由 out_path 扩展名决定）。
+
+    单段直接转码；多段用 concat demuxer 先拼接再转码。中间分段始终是无损 WAV，
+    只在这里做一次有损编码，避免分段方案重复压缩叠加损质。bitrate 仅对有损格式
+    有效（None 表示无损或交给 ffmpeg 默认）。
+    """
+    if len(parts) == 1:
+        cmd = ["ffmpeg", "-i", str(parts[0]), "-vn"]
+        list_file = None
+    else:
+        list_file = out_path.parent / "_concat_list.txt"
+        # concat demuxer 要求每行 file '绝对路径'
+        lines = [f"file '{p.resolve().as_posix()}'" for p in parts]
+        list_file.write_text("\n".join(lines), encoding="utf-8")
+        cmd = ["ffmpeg", "-f", "concat", "-safe", "0", "-i", str(list_file), "-vn"]
+    if bitrate:
+        cmd += ["-b:a", bitrate]
+    cmd += [str(out_path), "-y"]
     try:
-        cmd = [
-            "ffmpeg", "-f", "concat", "-safe", "0",
-            "-i", str(list_file), "-c", "copy", str(out_path), "-y",
-        ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            raise SeparationError(f"合并人声分段失败: {result.stderr[:300]}")
+            raise SeparationError(f"编码最终人声文件失败: {result.stderr[:300]}")
     finally:
-        list_file.unlink(missing_ok=True)
+        if list_file is not None:
+            list_file.unlink(missing_ok=True)
+
+
+# 无损音频格式：输出这些格式时不套用比特率（由位深决定，无比特率概念）。
+_LOSSLESS_FORMATS = {"wav", "flac", "aiff", "aif", "alac"}
+
+
+def _round_up_pow2_kbps(bitrate_bps: int) -> int:
+    """把原始比特率(bps)向上取整到最小的 2 的幂 kbps，夹到 [32, 320]。
+
+    例：63kbps→64，118kbps→128，128kbps→128。人声分离后内容比原混音简单，输出
+    不超过原始比特率即可保真，故取 >= 原值的最近 2 的幂；上限 320（MP3 常见最高
+    档），下限 32。留 5% 容差吸收 MP3 标称偏差（如 129k 仍归 128 而非跳到 256）。
+    """
+    kbps = bitrate_bps / 1000 * 0.95
+    p = 32
+    while p < kbps and p < 320:
+        p *= 2
+    return min(p, 320)
 
 
 # audio-separator 模型（当前使用的是 MDXC，轻量模型，人声 SDR 10.2，伴奏 15.5。VIP 模型，综合表现优秀，速度与干净度兼顾）。
@@ -116,6 +166,7 @@ class VocalSeparator:
         segment_size: int = 512,
         overlap: float = 0.1,
         segment_minutes: float = 15.0,
+        output_bitrate: str | None = None,
     ):
         self.output_dir = output_dir
         self.model_filename = model_filename
@@ -126,6 +177,9 @@ class VocalSeparator:
         # 超过该时长的音频按此长度切段、逐段分离再合并，避免一次性出整轨爆内存。
         # <=0 表示禁用分段、始终整段处理。
         self.segment_minutes = segment_minutes
+        # 最终输出比特率（如 "128k"）。None=自动对齐原音频（向上取整到 2 的幂 kbps）。
+        # 仅对有损输出格式（MP3/AAC 等）生效；无损格式忽略。
+        self.output_bitrate = output_bitrate
         self._sep = None
 
     def load(self) -> None:
@@ -141,9 +195,12 @@ class VocalSeparator:
             ) from e
 
         print(f"\n🎚️  加载人声分离模型: {self.model_filename}")
+        # 底层统一输出无损 WAV：作为中间产物，最终格式/比特率由 _encode_final 一次性
+        # 套用，避免分段方案里反复有损压缩叠加损质，也绕开 output_bitrate 在 load()
+        # 固化、运行时改不动的限制。
         kwargs: dict = {
             "output_dir": self.output_dir,
-            "output_format": self.output_format,
+            "output_format": "WAV",
             "output_single_stem": "Vocals",
         }
         if self.model_file_dir is not None:
@@ -154,7 +211,6 @@ class VocalSeparator:
         # 注意：MDX(.onnx) 的 overlap 是 0~1 小数；MDXC(roformer .ckpt) 的 overlap
         # 是整数步数，语义不同，故两边分开传，避免给 roformer 塞错类型。
         self._sep = Separator(
-            output_bitrate="128k",
             mdx_params={
                 "hop_length": 1024,
                 "enable_denoise": False,
@@ -174,68 +230,83 @@ class VocalSeparator:
         self._sep.load_model(model_filename=self.model_filename)
         print("✅ 模型加载完成")
 
+    def _resolve_bitrate(self, in_path: Path) -> str | None:
+        """决定最终输出比特率。无损格式返回 None；有损格式：用户指定优先，
+        否则探测原音频比特率并向上取整到 2 的幂 kbps。探测失败则返回 None
+        （交给 ffmpeg 默认）。
+        """
+        if self.output_format.lower() in _LOSSLESS_FORMATS:
+            return None
+        if self.output_bitrate is not None:
+            return self.output_bitrate
+        src_bps = _probe_bitrate(str(in_path))
+        if src_bps <= 0:
+            return None
+        kbps = _round_up_pow2_kbps(src_bps)
+        print(f"🎚️  原音频比特率 ~{src_bps // 1000}k，输出对齐为 {kbps}k")
+        return f"{kbps}k"
+
     def separate(self, audio_file: str) -> str:
         """分离出人声轨，返回人声音频文件路径。
 
         长音频（超过 segment_minutes）按固定时长切段、逐段分离再用 ffmpeg 合并，
         避免 audio-separator 一次性把整轨结果拉进内存导致 MemoryError。短音频直接
-        整段处理。
+        整段处理。底层统一产出无损 WAV，最终再编码为目标格式/比特率。
         """
         in_path = Path(audio_file)
         if not in_path.is_file():
             raise FileNotFoundError(f"找不到输入音频文件: {in_path}")
 
+        bitrate = self._resolve_bitrate(in_path)
+        ext = self.output_format.lower()
+        final_path = Path(self.output_dir) / f"{in_path.stem}_(Vocals).{ext}"
+
         seg_seconds = self.segment_minutes * 60
         duration = _probe_duration(str(in_path)) if seg_seconds > 0 else 0.0
 
-        if seg_seconds <= 0 or duration <= seg_seconds:
-            # 短音频或禁用分段：整段处理
-            return self._separate_one(in_path)
+        tmp_dir = Path(tempfile.mkdtemp(prefix="kits_sep_", dir=self.output_dir))
+        wav_parts: list[Path] = []
+        try:
+            if seg_seconds <= 0 or duration <= seg_seconds:
+                # 短音频或禁用分段：整段分离出一份 WAV
+                wav_parts.append(Path(self._separate_one(in_path)))
+            else:
+                wav_parts = self._separate_segments(in_path, duration, seg_seconds, tmp_dir)
 
-        return self._separate_segmented(in_path, duration, seg_seconds)
+            print(f"\n🔗 输出人声 → {final_path.name}")
+            _encode_final(wav_parts, final_path, bitrate)
+            print(f"✅ 人声已保存: {final_path}")
+            return str(final_path)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            for p in wav_parts:  # 清理落在 output_dir 的中间人声 WAV
+                p.unlink(missing_ok=True)
 
-    def _separate_segmented(
-        self, in_path: Path, duration: float, seg_seconds: float
-    ) -> str:
-        """按固定时长切段、逐段分离、ffmpeg 合并。
-
-        分段切片放临时目录；人声产物受 audio-separator 固化的 output_dir 限制只能落
-        在 self.output_dir，故合并完成后再清理这些中间人声文件，避免污染输出目录。
-        """
+    def _separate_segments(
+        self, in_path: Path, duration: float, seg_seconds: float, tmp_dir: Path
+    ) -> list[Path]:
+        """按固定时长切段、逐段分离，返回各段人声 WAV 路径列表（供合并）。"""
         num_segments = math.ceil(duration / seg_seconds)
         print(
             f"\n🎬 音频较长（{duration / 60:.1f} 分钟），按 {self.segment_minutes:g} "
             f"分钟切成 {num_segments} 段逐段分离，避免内存溢出"
         )
-
-        tmp_dir = Path(tempfile.mkdtemp(prefix="kits_sep_", dir=self.output_dir))
         vocal_parts: list[Path] = []
-        try:
-            for idx in range(num_segments):
-                start = idx * seg_seconds
-                dur = min(seg_seconds, duration - start)
-                print(f"\n── 第 {idx + 1}/{num_segments} 段（{start / 60:.1f}~"
-                      f"{(start + dur) / 60:.1f} 分钟）──")
+        for idx in range(num_segments):
+            start = idx * seg_seconds
+            dur = min(seg_seconds, duration - start)
+            print(f"\n── 第 {idx + 1}/{num_segments} 段（{start / 60:.1f}~"
+                  f"{(start + dur) / 60:.1f} 分钟）──")
 
-                seg_in = tmp_dir / f"seg_{idx:03d}.wav"
-                _slice_audio(str(in_path), start, dur, seg_in)
-                vocal = self._separate_one(seg_in)
-                vocal_parts.append(Path(vocal))
-                seg_in.unlink(missing_ok=True)  # 原始分段切片用完即删，省空间
-
-            out_name = f"{in_path.stem}_(Vocals).{self.output_format.lower()}"
-            final_path = Path(self.output_dir) / out_name
-            print(f"\n🔗 合并 {len(vocal_parts)} 段人声 → {final_path.name}")
-            _concat_audio(vocal_parts, final_path)
-            print(f"✅ 人声已保存: {final_path}")
-            return str(final_path)
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            for p in vocal_parts:  # 清理落在 output_dir 的中间人声分段
-                p.unlink(missing_ok=True)
+            seg_in = tmp_dir / f"seg_{idx:03d}.wav"
+            _slice_audio(str(in_path), start, dur, seg_in)
+            vocal = self._separate_one(seg_in)
+            vocal_parts.append(Path(vocal))
+            seg_in.unlink(missing_ok=True)  # 原始分段切片用完即删，省空间
+        return vocal_parts
 
     def _separate_one(self, in_path: Path) -> str:
-        """对单个（已确保不超长的）音频文件做一次分离，返回人声轨路径。
+        """对单个（已确保不超长的）音频文件做一次分离，返回人声 WAV 路径。
 
         audio-separator 的输出目录在 load() 时已固化为 self.output_dir，运行时改
         属性无效，故产物统一落在 self.output_dir，返回值据此拼绝对路径。
