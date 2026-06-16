@@ -11,6 +11,7 @@ dependencies = [
     "audio-separator[gpu]>=0.44.0",
     "httpx>=0.28.1",
     "huggingface-hub>=1.19.0",
+    "onnxruntime-gpu>=1.26.0",
     "punctuators>=0.0.7",
     "torch>=2.11.0",
     "transformers>=5.12.0",
@@ -31,6 +32,12 @@ url = "https://download.pytorch.org/whl/cu128"
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
+
+# punctuators 间接依赖 CPU 版 onnxruntime，会覆盖 audio-separator[gpu] 装的
+# onnxruntime-gpu（同装一个 onnxruntime/ 目录、CPU 版 dll 顶掉 GPU 版），导致
+# CUDAExecutionProvider 丢失、.onnx 人声分离退回 CPU。这里强制改写为 gpu 版。
+[tool.uv]
+override-dependencies = ["onnxruntime ; sys_platform == 'never'"]
 
 [dependency-groups]
 dev = [

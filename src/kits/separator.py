@@ -10,10 +10,31 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-# audio-separator 模型（BS-Roformer，人声分离 SDR 高）。可用 model_filename 覆盖。
-DEFAULT_MODEL = "UVR-MDX-NET_Main_427.onnx"  # 人声 SDR 10.2，伴奏 15.5。VIP 模型，综合表现优秀，速度与干净度兼顾
+
+def _expose_torch_cuda_dlls() -> None:
+    """把 torch 自带的 CUDA 12 / cuDNN 9 dll 目录加入 DLL 搜索路径。
+
+    onnxruntime-gpu 需要 cublasLt64_12.dll / cudnn64_9.dll 等运行时库才能启用
+    CUDAExecutionProvider，否则静默回落到 CPU（人声分离慢数倍）。本机没装独立
+    CUDA Toolkit，但 torch(cu128) 在 torch/lib 下自带这些 dll，这里直接复用，
+    免去额外安装。必须在 import onnxruntime 之前调用。仅 Windows 需要。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import torch
+    except ImportError:
+        return
+    torch_lib = Path(torch.__file__).parent / "lib"
+    if torch_lib.is_dir():
+        os.add_dll_directory(str(torch_lib))
+
+# audio-separator 模型（当前使用的是 MDXC，轻量模型，人声 SDR 10.2，伴奏 15.5。VIP 模型，综合表现优秀，速度与干净度兼顾）。
+# 可用 model_filename 覆盖。
+DEFAULT_MODEL = "UVR-MDX-NET_Main_427.onnx"
 
 
 class SeparationError(RuntimeError):
@@ -41,6 +62,9 @@ class VocalSeparator:
 
     def load(self) -> None:
         """构造底层 Separator 并加载模型。延迟导入 audio-separator。"""
+        # audio-separator 会 import onnxruntime；先暴露 torch 自带的 CUDA dll，
+        # 否则 onnxruntime-gpu 找不到 cublasLt/cudnn，CUDAExecutionProvider 失效。
+        _expose_torch_cuda_dlls()
         try:
             from audio_separator.separator import Separator
         except ImportError as e:
