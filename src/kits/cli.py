@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
 from kits.subtitle import (
@@ -52,6 +53,18 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
         "--separate-model",
         default=None,
         help="人声分离模型文件名(默认 BS-Roformer)，仅在 --separate 时生效",
+    )
+    parser.add_argument(
+        "--separate-segment-size",
+        type=int,
+        default=512,
+        help="人声分离分块大小，越大越快越吃显存(默认 512)，仅在 --separate 时生效",
+    )
+    parser.add_argument(
+        "--separate-overlap",
+        type=float,
+        default=0.1,
+        help="人声分离分块重叠(0~1)，越小越快(默认 0.1)，仅在 --separate 时生效",
     )
     # 标点恢复（蒸馏模型 chunk 无标点时靠它断句）。默认开启。
     parser.add_argument(
@@ -109,6 +122,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--format", default="MP3", help="输出音频格式(WAV/MP3/FLAC 等，默认 MP3)"
     )
+    sp.add_argument(
+        "--segment-size",
+        type=int,
+        default=512,
+        help="分块大小，越大分块越少、越快越吃显存(默认 512；显存紧张可降到 256)",
+    )
+    sp.add_argument(
+        "--overlap",
+        type=float,
+        default=0.1,
+        help="MDX(.onnx) 模型分块重叠(0~1)，越小越快、接缝质量略降(默认 0.1)",
+    )
 
     # --- sum 子命令 ---
     sm = sub.add_parser("sum", help="对已有 SRT 字幕用 AI 总结(DeepSeek)")
@@ -151,6 +176,10 @@ def _maybe_separate(audio_file: str, args: argparse.Namespace) -> str:
     kwargs: dict = {"output_dir": out_dir}
     if getattr(args, "separate_model", None):
         kwargs["model_filename"] = args.separate_model
+    if getattr(args, "separate_segment_size", None) is not None:
+        kwargs["segment_size"] = args.separate_segment_size
+    if getattr(args, "separate_overlap", None) is not None:
+        kwargs["overlap"] = args.separate_overlap
     separator = VocalSeparator(**kwargs)
     return separator.separate(audio_file)
 
@@ -327,7 +356,12 @@ def _run_separate(args: argparse.Namespace) -> None:
     if not input_path.is_file():
         raise FileNotFoundError(f"找不到输入音频文件: {input_path}")
 
-    kwargs: dict = {"output_dir": args.dir, "output_format": args.format}
+    kwargs: dict = {
+        "output_dir": args.dir,
+        "output_format": args.format,
+        "segment_size": args.segment_size,
+        "overlap": args.overlap,
+    }
     if args.model:
         kwargs["model_filename"] = args.model
     separator = VocalSeparator(**kwargs)
@@ -380,6 +414,13 @@ def _run_sum(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # Windows 控制台默认 GBK，输出里的 emoji（🎚️ 等）会触发 UnicodeEncodeError
+    # 让整条流水线崩溃。统一把标准流切到 UTF-8（errors=replace 兜底）。
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
     args = build_parser().parse_args(argv)
     if args.command == "download":
         _run_download(args)

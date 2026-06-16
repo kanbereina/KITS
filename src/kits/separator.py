@@ -53,11 +53,15 @@ class VocalSeparator:
         model_filename: str = DEFAULT_MODEL,
         output_format: str = "MP3",
         model_file_dir: str | None = None,
+        segment_size: int = 512,
+        overlap: float = 0.1,
     ):
         self.output_dir = output_dir
         self.model_filename = model_filename
         self.output_format = output_format
         self.model_file_dir = model_file_dir
+        self.segment_size = segment_size
+        self.overlap = overlap
         self._sep = None
 
     def load(self) -> None:
@@ -81,7 +85,28 @@ class VocalSeparator:
         if self.model_file_dir is not None:
             kwargs["model_file_dir"] = self.model_file_dir
 
-        self._sep = Separator(output_bitrate="128k", **kwargs)
+        # segment_size 越大 / overlap 越小，分块数越少、迭代越快（GPU 也更吃满）。
+        # 对“压 BGM 的人声预处理”而言不需要高 overlap，默认偏快档。
+        # 注意：MDX(.onnx) 的 overlap 是 0~1 小数；MDXC(roformer .ckpt) 的 overlap
+        # 是整数步数，语义不同，故两边分开传，避免给 roformer 塞错类型。
+        self._sep = Separator(
+            output_bitrate="128k",
+            mdx_params={
+                "hop_length": 1024,
+                "enable_denoise": False,
+                "batch_size": 1,
+                "segment_size": self.segment_size,
+                "overlap": self.overlap,
+            },
+            mdxc_params={
+                "override_model_segment_size": True,
+                "pitch_shift": 0,
+                "batch_size": 1,
+                "segment_size": self.segment_size,
+                "overlap": 8,
+            },
+            **kwargs,
+        )
         self._sep.load_model(model_filename=self.model_filename)
         print("✅ 模型加载完成")
 
