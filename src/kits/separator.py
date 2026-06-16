@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# audio-separator 默认模型（BS-Roformer，人声分离 SDR 高）。可用 model_filename 覆盖。
-DEFAULT_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
+# audio-separator 模型（BS-Roformer，人声分离 SDR 高）。可用 model_filename 覆盖。
+DEFAULT_MODEL = "UVR-MDX-NET_Main_427.onnx"  # 人声 SDR 10.2，伴奏 15.5。VIP 模型，综合表现优秀，速度与干净度兼顾
 
 
 class SeparationError(RuntimeError):
@@ -57,7 +57,7 @@ class VocalSeparator:
         if self.model_file_dir is not None:
             kwargs["model_file_dir"] = self.model_file_dir
 
-        self._sep = Separator(**kwargs)
+        self._sep = Separator(output_bitrate="128k", **kwargs)
         self._sep.load_model(model_filename=self.model_filename)
         print("✅ 模型加载完成")
 
