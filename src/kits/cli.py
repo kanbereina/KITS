@@ -52,7 +52,7 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--separate-model",
         default=None,
-        help="人声分离模型文件名(默认 BS-Roformer)，仅在 --separate 时生效",
+        help="人声分离模型文件名(默认 UVR-MDX-NET_Main_427.onnx)，仅在 --separate 时生效",
     )
     parser.add_argument(
         "--separate-segment-size",
@@ -128,8 +128,12 @@ def build_parser() -> argparse.ArgumentParser:
     # --- separate 子命令 ---
     sp = sub.add_parser("separate", help="从音频分离出人声(audio-separator)")
     sp.add_argument("-i", "--input", required=True, help="输入音频文件(必填)")
-    sp.add_argument("--dir", default="downloads", help="人声输出目录")
-    sp.add_argument("--model", default=None, help="分离模型文件名(默认 BS-Roformer)")
+    sp.add_argument(
+        "-o", "--output", default=None,
+        help="输出人声文件路径(默认在 --dir 下生成 原名_(Vocals).格式)",
+    )
+    sp.add_argument("--dir", default="output", help="人声输出目录(未指定 -o 时生效)")
+    sp.add_argument("--model", default=None, help="分离模型文件名(默认 UVR-MDX-NET_Main_427.onnx)")
     sp.add_argument(
         "--format", default="MP3", help="输出音频格式(WAV/MP3/FLAC 等，默认 MP3)"
     )
@@ -382,8 +386,11 @@ def _run_separate(args: argparse.Namespace) -> None:
     if not input_path.is_file():
         raise FileNotFoundError(f"找不到输入音频文件: {input_path}")
 
+    # 指定 -o 时，工作目录（放临时分段、底层中间产物）用输出文件所在目录；
+    # 否则用 --dir。最终落点由 separate(output_path=...) 决定。
+    work_dir = str(Path(args.output).parent) if args.output else args.dir
     kwargs: dict = {
-        "output_dir": args.dir,
+        "output_dir": work_dir,
         "output_format": args.format,
         "segment_size": args.segment_size,
         "overlap": args.overlap,
@@ -393,7 +400,7 @@ def _run_separate(args: argparse.Namespace) -> None:
     if args.model:
         kwargs["model_filename"] = args.model
     separator = VocalSeparator(**kwargs)
-    vocals = separator.separate(str(input_path))
+    vocals = separator.separate(str(input_path), output_path=args.output)
 
     print(f"\n✅ 人声音频已保存到: {vocals}")
     print("\n💡 提示: 可以把人声音频再交给 subtitle 子命令转字幕，降低 BGM 干扰")

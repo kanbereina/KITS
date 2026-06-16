@@ -159,7 +159,7 @@ class VocalSeparator:
 
     def __init__(
         self,
-        output_dir: str = "downloads",
+        output_dir: str = "output",
         model_filename: str = DEFAULT_MODEL,
         output_format: str = "MP3",
         model_file_dir: str | None = None,
@@ -230,12 +230,12 @@ class VocalSeparator:
         self._sep.load_model(model_filename=self.model_filename)
         print("✅ 模型加载完成")
 
-    def _resolve_bitrate(self, in_path: Path) -> str | None:
-        """决定最终输出比特率。无损格式返回 None；有损格式：用户指定优先，
-        否则探测原音频比特率并向上取整到 2 的幂 kbps。探测失败则返回 None
-        （交给 ffmpeg 默认）。
+    def _resolve_bitrate(self, in_path: Path, ext: str) -> str | None:
+        """决定最终输出比特率。无损格式（按最终扩展名判断）返回 None；有损格式：
+        用户指定优先，否则探测原音频比特率并向上取整到 2 的幂 kbps。探测失败则
+        返回 None（交给 ffmpeg 默认）。
         """
-        if self.output_format.lower() in _LOSSLESS_FORMATS:
+        if ext.lower() in _LOSSLESS_FORMATS:
             return None
         if self.output_bitrate is not None:
             return self.output_bitrate
@@ -246,8 +246,11 @@ class VocalSeparator:
         print(f"🎚️  原音频比特率 ~{src_bps // 1000}k，输出对齐为 {kbps}k")
         return f"{kbps}k"
 
-    def separate(self, audio_file: str) -> str:
+    def separate(self, audio_file: str, output_path: str | None = None) -> str:
         """分离出人声轨，返回人声音频文件路径。
+
+        output_path 指定时直接用作最终输出文件（输出格式按其扩展名），否则在
+        output_dir 下派生 `{输入名}_(Vocals).{output_format}`。
 
         长音频（超过 segment_minutes）按固定时长切段、逐段分离再用 ffmpeg 合并，
         避免 audio-separator 一次性把整轨结果拉进内存导致 MemoryError。短音频直接
@@ -257,13 +260,22 @@ class VocalSeparator:
         if not in_path.is_file():
             raise FileNotFoundError(f"找不到输入音频文件: {in_path}")
 
-        bitrate = self._resolve_bitrate(in_path)
-        ext = self.output_format.lower()
-        final_path = Path(self.output_dir) / f"{in_path.stem}_(Vocals).{ext}"
+        if output_path is not None:
+            final_path = Path(output_path)
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            ext = final_path.suffix.lstrip(".").lower() or self.output_format.lower()
+        else:
+            ext = self.output_format.lower()
+            final_path = Path(self.output_dir) / f"{in_path.stem}_(Vocals).{ext}"
+
+        bitrate = self._resolve_bitrate(in_path, ext)
 
         seg_seconds = self.segment_minutes * 60
         duration = _probe_duration(str(in_path)) if seg_seconds > 0 else 0.0
 
+        # 临时分段与底层中间产物都落在 output_dir，先确保它存在（-o 指定的相对
+        # 文件名其父目录可能尚未建）。
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
         tmp_dir = Path(tempfile.mkdtemp(prefix="kits_sep_", dir=self.output_dir))
         wav_parts: list[Path] = []
         try:
