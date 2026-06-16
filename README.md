@@ -2,8 +2,6 @@
 
 # KITS
 
-**Kano Intelligent Twitch Summarizer**
-
 _鹿乃 Twitch 直播智能总结_
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
@@ -12,13 +10,13 @@ _鹿乃 Twitch 直播智能总结_
 [![CUDA](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
 [![PyTorch](https://img.shields.io/badge/PyTorch-cu128-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 
-一站式处理鹿乃 Twitch 直播：**下载直播 → 分离人声 → 转写带时间戳的日语字幕 → 翻译成中文 → AI 总结**。
+一站式处理鹿乃 Twitch 直播：**下载直播 → 分离人声 → 转写 SRT 日语字幕文件 → 可选转写 SRT 中文字幕文件 → AI 总结**。
 
 </div>
 
 ---
 
-## 为什么用 KITS
+## 为什么用 KITS ？
 
 - **一条龙流水线** — 从直播 URL 到中文字幕、AI 总结，全程命令行串联，无需手动倒腾中间文件。
 - **日语识别更准** — 默认 [kotoba-whisper-v2.2](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.2) 蒸馏模型，自动补日语句读后再断句，字幕是完整句子而非碎片。
