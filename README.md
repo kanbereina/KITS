@@ -1,8 +1,33 @@
+<div align="center">
+
 # KITS
 
-基于 [kotoba-whisper-v2.2](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.2) 的鹿乃 Twitch 直播工具。可以**下载 Twitch 直播**、合并为 MP4 / 提取 MP3，把音频转换成**完整句子、带时间戳的 SRT 字幕文件**，可调用 **DeepSeek 把日语字幕翻译成中文**、对字幕做 **AI 总结**，还支持**分离人声**。支持 50 系 Nvidia 显卡（CUDA 12.8）。
+**Kano Intelligent Twitch Summarizer**
 
-## 特性
+_鹿乃 Twitch 直播智能总结_
+
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![Release](https://img.shields.io/github/v/release/kanbereina/KITS?display_name=tag&sort=semver)](https://github.com/kanbereina/KITS/releases)
+[![Python](https://img.shields.io/badge/Python-3.12~3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![CUDA](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
+[![PyTorch](https://img.shields.io/badge/PyTorch-cu128-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+
+一站式处理鹿乃 Twitch 直播：**下载直播 → 分离人声 → 转写带时间戳的日语字幕 → 翻译成中文 → AI 总结**。
+
+</div>
+
+---
+
+## 为什么用 KITS
+
+- **一条龙流水线** — 从直播 URL 到中文字幕、AI 总结，全程命令行串联，无需手动倒腾中间文件。
+- **日语识别更准** — 默认 [kotoba-whisper-v2.2](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.2) 蒸馏模型，自动补日语句读后再断句，字幕是完整句子而非碎片。
+- **句子完整不截断** — 长音频按静音切分、分段流式转写，切点落在无人说话处，边转边落盘，精度与整段转写一致。
+- **唱歌场次友好** — 内置 audio-separator 人声分离，长音频自动切段防爆内存、输出比特率对齐原音频，去掉 BGM / 伴奏再识别。
+- **省心的中文化** — DeepSeek 逐条翻译保留时间轴，并能按时间线 / 概述 / 高光 / 歌单等预设一键总结整场直播。
+- **专为 50 系显卡调优** — PyTorch 走 `pytorch-cu128`（CUDA 12.8），onnxruntime 复用 torch 自带 CUDA 运行时，开箱即用 GPU 加速。
+
+## 功能特性
 
 - 🐙 异步并发下载 Twitch 直播 TS 分片，自动探测视频长度，合并为 MP4
 - 🎵 可选提取 MP3 音频，可选保留 / 清理临时 TS 文件
@@ -103,7 +128,11 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | `--min-silence` | `0.5` | 最短静音时长（秒），短于此不算切点 |
 | `--filter-game` | 关闭 | 剔除指定游戏的播报 / 技能语音，按游戏名启用、可多次指定（整条完全匹配才删） |
 | `--separate` | 关闭 | 转录前先用 audio-separator 分离人声（去 BGM / 唱歌干扰，需安装 audio-separator + GPU） |
-| `--separate-model` | BS-Roformer | 人声分离模型文件名，仅在 `--separate` 时生效 |
+| `--separate-model` | `UVR-MDX-NET_Main_427.onnx` | 人声分离模型文件名，仅在 `--separate` 时生效 |
+| `--separate-segment-size` | `512` | 人声分离分块大小，越大越快越吃显存，仅在 `--separate` 时生效 |
+| `--separate-overlap` | `0.1` | 人声分离分块重叠（0~1），越小越快，仅在 `--separate` 时生效 |
+| `--separate-segment-minutes` | `15` | 人声分离长音频切段时长（分钟），防爆内存（`<=0` 关闭），仅在 `--separate` 时生效 |
+| `--separate-output-bitrate` | 自动对齐原音频 | 人声输出比特率（如 `128k`），无损格式忽略，仅在 `--separate` 时生效 |
 | `--no-punctuate` | （默认补标点） | 关闭标点恢复；模型本身已输出标点时可关 |
 | `--punct-model` | xlm-roberta 日语句读 | 标点恢复模型 |
 
@@ -185,14 +214,17 @@ uv run kits translate -i live.srt -o live_cn.srt --api-key sk-xxxx
 
 ### separate：分离人声
 
-用 [audio-separator](https://github.com/nomadkaraoke/python-audio-separator)（UVR/MDX 模型）从音频中分离出人声，去掉 BGM / 伴奏。适合鹿乃唱歌场次：先分离人声再转录，可显著降低背景音乐对识别的干扰。
+用 [audio-separator](https://github.com/nomadkaraoke/python-audio-separator)（UVR/MDX 模型）从音频中分离出人声，去掉 BGM / 伴奏。适合鹿乃唱歌场次：先分离人声再转录，可显著降低背景音乐对识别的干扰。默认模型 `UVR-MDX-NET_Main_427.onnx`（MDX 架构，走 onnxruntime GPU 加速）。
 
 ```bash
-# 分离人声，默认输出 MP3 到 downloads/
+# 分离人声，默认输出 MP3 到 output/（原名_(Vocals).mp3）
 uv run kits separate -i live.mp3
 
-# 指定输出目录、格式与模型
-uv run kits separate -i live.mp3 --dir out --format WAV --model UVR-MDX-NET-Inst_HQ_3.onnx
+# 直接指定输出文件路径（与其他命令一致，-o 给文件名）
+uv run kits separate -i live.mp3 -o vocals.mp3
+
+# 指定格式与模型
+uv run kits separate -i live.mp3 -o vocals.wav --model Kim_Vocal_2.onnx
 ```
 
 首次运行会自动下载分离模型。需要 CUDA GPU 与 `audio-separator[gpu]`（已在依赖中，`uv sync` 即装）。
@@ -200,10 +232,17 @@ uv run kits separate -i live.mp3 --dir out --format WAV --model UVR-MDX-NET-Inst
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `-i, --input` | （必填） | 输入音频文件路径 |
-| `--dir` | `downloads` | 人声输出目录 |
-| `--model` | BS-Roformer | 分离模型文件名（audio-separator 模型库中的文件名） |
+| `-o, --output` | `--dir/原名_(Vocals).格式` | 输出人声文件路径，指定时输出格式按其扩展名 |
+| `--dir` | `output` | 人声输出目录（未指定 `-o` 时生效） |
+| `--model` | `UVR-MDX-NET_Main_427.onnx` | 分离模型文件名（audio-separator 模型库中的文件名） |
 | `--format` | `MP3` | 输出音频格式（WAV / MP3 / FLAC 等） |
+| `--segment-size` | `512` | 分块大小，越大越快越吃显存（显存紧张可降到 256） |
+| `--overlap` | `0.1` | MDX(.onnx) 分块重叠（0~1），越小越快、接缝质量略降 |
+| `--segment-minutes` | `15` | 长音频按此时长（分钟）切段逐段分离再合并，防爆内存（`<=0` 关闭） |
+| `--output-bitrate` | 自动对齐原音频 | 输出比特率（如 `128k`），默认探测原音频并向上取整到 2 的幂；无损格式忽略 |
 
+> 长音频（如 4 小时录播）一次性分离会撑爆内存，故默认按 `--segment-minutes` 切段、逐段分离再用 ffmpeg 无缝合并；中间产物为无损 WAV，最终只编码一次。输出比特率默认对齐原音频（人声分离后内容简单，不超过原始比特率即可保真），避免固定高码率导致文件虚大。
+>
 > 也可以不单独跑 `separate`，直接在 `subtitle` / `download` 上加 `--separate`，转录前自动分离人声。
 
 ### sum：AI 总结字幕
