@@ -66,6 +66,12 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
         default=0.1,
         help="人声分离分块重叠(0~1)，越小越快(默认 0.1)，仅在 --separate 时生效",
     )
+    parser.add_argument(
+        "--separate-segment-minutes",
+        type=float,
+        default=15.0,
+        help="人声分离长音频切段时长(分钟)，防爆内存(默认 15；<=0 关闭)，仅在 --separate 时生效",
+    )
     # 标点恢复（蒸馏模型 chunk 无标点时靠它断句）。默认开启。
     parser.add_argument(
         "--no-punctuate",
@@ -134,6 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.1,
         help="MDX(.onnx) 模型分块重叠(0~1)，越小越快、接缝质量略降(默认 0.1)",
     )
+    sp.add_argument(
+        "--segment-minutes",
+        type=float,
+        default=15.0,
+        help="长音频按此时长(分钟)切段逐段分离再合并，防爆内存(默认 15；<=0 关闭)",
+    )
 
     # --- sum 子命令 ---
     sm = sub.add_parser("sum", help="对已有 SRT 字幕用 AI 总结(DeepSeek)")
@@ -180,6 +192,8 @@ def _maybe_separate(audio_file: str, args: argparse.Namespace) -> str:
         kwargs["segment_size"] = args.separate_segment_size
     if getattr(args, "separate_overlap", None) is not None:
         kwargs["overlap"] = args.separate_overlap
+    if getattr(args, "separate_segment_minutes", None) is not None:
+        kwargs["segment_minutes"] = args.separate_segment_minutes
     separator = VocalSeparator(**kwargs)
     return separator.separate(audio_file)
 
@@ -361,6 +375,7 @@ def _run_separate(args: argparse.Namespace) -> None:
         "output_format": args.format,
         "segment_size": args.segment_size,
         "overlap": args.overlap,
+        "segment_minutes": args.segment_minutes,
     }
     if args.model:
         kwargs["model_filename"] = args.model
