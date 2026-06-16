@@ -23,7 +23,7 @@ from transformers import pipeline
 
 from kits.subtitle import Word
 
-MODEL_ID = "openai/whisper-large-v3-turbo"
+MODEL_ID = "kotoba-tech/kotoba-whisper-v2.2"
 
 
 def _silence_warnings() -> None:
@@ -181,25 +181,35 @@ class Transcriber:
         self._pipe = pipeline(
             "automatic-speech-recognition",
             model=self.model_id,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,  # 沿用前面的精度设置（GPU 用 float16，CPU 用 float32）
             device=self.device,
-            chunk_length_s=30,
-            stride_length_s=(5, 3),
+            chunk_length_s=15,
+            model_kwargs = {"attn_implementation": "sdpa"} if torch.cuda.is_available() else {},  # 传入注意力实现配置（GPU 时启用 sdpa）
+            batch_size=8,  # 批处理大小=8，表示一次性处理 8 个音频文件/片段（提高吞吐量）
+            stride_length_s=(5, 3),  # 处理长音频的参数，表示滑动窗口的步长策略
         )
         print("✅ 模型加载完成")
 
     def _transcribe_file(
         self, audio_file: str, language: str, beams: int
     ) -> list[Word]:
-        """转录单个音频文件，返回（相对该文件的）词级时间戳。内部方法。"""
+        """转录单个音频文件，返回（相对该文件的）词级时间戳。内部方法。
+
+        注意时间戳粒度：kotoba-whisper 等蒸馏模型解码器只有 2 层，但其
+        generation_config 的 alignment_heads 继承自原版 large-v3（引用到第 25 层），
+        用 return_timestamps="word" 抽词级时间戳会在 cross_attentions[l] 越界
+        （IndexError）。故这里用 return_timestamps=True 取 chunk（短语）级时间戳——
+        其结构同为 {"text", "timestamp": (start, end)}，兼容 Word 契约与 segment_sentences。
+        """
         if self._pipe is None:
             self.load()
         # noinspection PyTypeChecker
         result: dict = self._pipe(
             audio_file,
-            return_timestamps="word",
+            return_timestamps=True,
             generate_kwargs={
-                "language": language,
-                "task": "transcribe",
+                # "language": language,
+                # "task": "transcribe",
                 "num_beams": beams,
                 # 抑制相同 n-gram 的无限循环（幻觉）
                 "no_repeat_ngram_size": 3,
@@ -211,7 +221,7 @@ class Transcriber:
         self,
         audio_file: str,
         language: str = "japanese",
-        beams: int = 1,
+        beams: int = 3,
     ) -> list[Word]:
         """转录整个音频，一次性返回词级时间戳列表（不分段）。"""
         if self._pipe is None:
@@ -230,7 +240,7 @@ class Transcriber:
         self,
         audio_file: str,
         language: str = "japanese",
-        beams: int = 1,
+        beams: int = 3,
         target_chunk: float = 300.0,
         max_chunk: float = 600.0,
         noise_db: float = -30.0,

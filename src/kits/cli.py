@@ -1,15 +1,17 @@
-"""命令行入口：子命令 download / subtitle / translate。
+"""命令行入口：子命令 download / subtitle / translate / separate / sum。
 
 download:  下载 Twitch 直播 -> 合并 MP4 -> 可选 MP3 / SRT
-subtitle:  已有音频 -> SRT 字幕
+subtitle:  已有音频 -> SRT 字幕（可选 --separate 先分离人声）
 translate: 日语 SRT -> 中文 SRT（DeepSeek 翻译）
-后续可在此扩展 summarize 子命令（DeepSeek 总结）。
+separate:  从音频分离出人声（audio-separator）
+sum:       已有 SRT -> AI 总结（DeepSeek，提示词走 JSON 预设）
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from pathlib import Path
 
 from kits.subtitle import (
@@ -40,6 +42,52 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="剔除指定游戏的系统播报/技能语音(整条完全匹配才删)，"
         "大小写不敏感、可多次指定，如 --filter-game valorant；目前支持: valorant(valo)",
+    )
+    # 转录前可选先分离人声（去掉 BGM / 唱歌干扰，提升识别精度）
+    parser.add_argument(
+        "--separate",
+        action="store_true",
+        help="转录前先用 audio-separator 分离人声（需安装 audio-separator）",
+    )
+    parser.add_argument(
+        "--separate-model",
+        default=None,
+        help="人声分离模型文件名(默认 UVR-MDX-NET_Main_427.onnx)，仅在 --separate 时生效",
+    )
+    parser.add_argument(
+        "--separate-segment-size",
+        type=int,
+        default=512,
+        help="人声分离分块大小，越大越快越吃显存(默认 512)，仅在 --separate 时生效",
+    )
+    parser.add_argument(
+        "--separate-overlap",
+        type=float,
+        default=0.1,
+        help="人声分离分块重叠(0~1)，越小越快(默认 0.1)，仅在 --separate 时生效",
+    )
+    parser.add_argument(
+        "--separate-segment-minutes",
+        type=float,
+        default=15.0,
+        help="人声分离长音频切段时长(分钟)，防爆内存(默认 15；<=0 关闭)，仅在 --separate 时生效",
+    )
+    parser.add_argument(
+        "--separate-output-bitrate",
+        default=None,
+        help="人声输出比特率(如 128k)，默认自动对齐原音频；无损格式忽略，仅在 --separate 时生效",
+    )
+    # 标点恢复（蒸馏模型 chunk 无标点时靠它断句）。默认开启。
+    parser.add_argument(
+        "--no-punctuate",
+        dest="punctuate",
+        action="store_false",
+        help="关闭标点恢复（默认开启；模型本身已输出标点时可关）",
+    )
+    parser.add_argument(
+        "--punct-model",
+        default=None,
+        help="标点恢复模型(默认 xlm-roberta 日语句读模型)",
     )
 
 
@@ -77,7 +125,93 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--model", default="deepseek-chat", help="DeepSeek 模型名")
     tr.add_argument("--batch-size", type=int, default=20, help="每批翻译的字幕条数")
 
+    # --- separate 子命令 ---
+    sp = sub.add_parser("separate", help="从音频分离出人声(audio-separator)")
+    sp.add_argument("-i", "--input", required=True, help="输入音频文件(必填)")
+    sp.add_argument(
+        "-o", "--output", default=None,
+        help="输出人声文件路径(默认在 --dir 下生成 原名_(Vocals).格式)",
+    )
+    sp.add_argument("--dir", default="output", help="人声输出目录(未指定 -o 时生效)")
+    sp.add_argument("--model", default=None, help="分离模型文件名(默认 UVR-MDX-NET_Main_427.onnx)")
+    sp.add_argument(
+        "--format", default="MP3", help="输出音频格式(WAV/MP3/FLAC 等，默认 MP3)"
+    )
+    sp.add_argument(
+        "--segment-size",
+        type=int,
+        default=512,
+        help="分块大小，越大分块越少、越快越吃显存(默认 512；显存紧张可降到 256)",
+    )
+    sp.add_argument(
+        "--overlap",
+        type=float,
+        default=0.1,
+        help="MDX(.onnx) 模型分块重叠(0~1)，越小越快、接缝质量略降(默认 0.1)",
+    )
+    sp.add_argument(
+        "--segment-minutes",
+        type=float,
+        default=15.0,
+        help="长音频按此时长(分钟)切段逐段分离再合并，防爆内存(默认 15；<=0 关闭)",
+    )
+    sp.add_argument(
+        "--output-bitrate",
+        default=None,
+        help="输出比特率(如 128k)，默认自动对齐原音频(向上取整到 2 的幂)；无损格式忽略",
+    )
+
+    # --- sum 子命令 ---
+    sm = sub.add_parser("sum", help="对已有 SRT 字幕用 AI 总结(DeepSeek)")
+    sm.add_argument("-i", "--input", required=True, help="输入 SRT 字幕文件(必填)")
+    sm.add_argument("-o", "--output", default=None, help="输出总结文件(默认在原名后加 .summary.md)")
+    sm.add_argument("--api-key", default=None, help="DeepSeek API Key(默认读环境变量 DEEPSEEK_API_KEY)")
+    sm.add_argument("--model", default="deepseek-chat", help="DeepSeek 模型名")
+    sm.add_argument(
+        "--preset",
+        default=None,
+        help="总结预设名(默认用配置里的 default)，如 timeline/summary/highlights/setlist",
+    )
+    sm.add_argument(
+        "--prompt-file",
+        default=None,
+        help="自定义提示词 JSON 文件，覆盖内置预设",
+    )
+    sm.add_argument(
+        "--max-chars",
+        type=int,
+        default=8000,
+        help="单块送审的最大字符数，超长字幕按此分块总结",
+    )
+
     return parser
+
+
+def _maybe_separate(audio_file: str, args: argparse.Namespace) -> str:
+    """若开启 --separate，则先分离人声并返回人声音频路径；否则原样返回。
+
+    延迟导入 separator 以避免无谓加载重依赖栈。
+    """
+    if not getattr(args, "separate", False):
+        return audio_file
+
+    from kits.separator import VocalSeparator
+
+    print("\n🎚️  转录前预处理：分离人声")
+    out_dir = str(Path(audio_file).parent)
+    kwargs: dict = {"output_dir": out_dir}
+    if getattr(args, "separate_model", None):
+        kwargs["model_filename"] = args.separate_model
+    if getattr(args, "separate_segment_size", None) is not None:
+        kwargs["segment_size"] = args.separate_segment_size
+    if getattr(args, "separate_overlap", None) is not None:
+        kwargs["overlap"] = args.separate_overlap
+    if getattr(args, "separate_segment_minutes", None) is not None:
+        kwargs["segment_minutes"] = args.separate_segment_minutes
+    if getattr(args, "separate_output_bitrate", None) is not None:
+        kwargs["output_bitrate"] = args.separate_output_bitrate
+    separator = VocalSeparator(**kwargs)
+    return separator.separate(audio_file)
 
 
 def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) -> list[Sentence]:
@@ -85,8 +219,11 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
 
     长音频按静音切分、分段转录，每段转完即断句并追加写盘（边转边出、可显示进度，
     中途中断时已写部分仍是合法 SRT）。切点落在静音处，不打断语句。
+    若开启 --separate，先分离人声再转录。
     """
     from kits.transcriber import Transcriber
+
+    audio_file = _maybe_separate(audio_file, args)
 
     transcriber = Transcriber()
     all_sentences: list[Sentence] = []
@@ -99,6 +236,17 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
 
         callouts = resolve_games(args.filter_game)
         print(f"🎮 已启用游戏播报过滤: {', '.join(args.filter_game)}")
+
+    # 标点恢复器：蒸馏模型（如 kotoba）产出的 chunk 无句末标点，补标点后才能断句。
+    # 默认开启，可用 --no-punctuate 关闭。提前实例化，整场复用一个模型。
+    punctuator = None
+    if getattr(args, "punctuate", True):
+        from kits.punctuator import Punctuator
+
+        kwargs: dict = {}
+        if getattr(args, "punct_model", None):
+            kwargs["model"] = args.punct_model
+        punctuator = Punctuator(**kwargs)
 
     print("\n" + "=" * 60)
     print("🎬 分段转录 + 生成 SRT 字幕")
@@ -115,6 +263,9 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
             min_silence=args.min_silence,
         )
         for words in segments_words:
+            # 转录后、断句前补标点（时间戳不变），让 segment_sentences 能在句末标点处断句
+            if punctuator is not None:
+                words = punctuator.restore(words)
             sentences = segment_sentences(
                 words,
                 max_gap=args.max_gap,
@@ -224,7 +375,87 @@ def _run_translate(args: argparse.Namespace) -> None:
     print("\n💡 提示: 可以直接将 SRT 文件拖入播放器或视频编辑软件使用")
 
 
+def _run_separate(args: argparse.Namespace) -> None:
+    from kits.separator import VocalSeparator
+
+    print("=" * 60)
+    print("🎚️  人声分离（audio-separator）")
+    print("=" * 60)
+
+    input_path = Path(args.input)
+    if not input_path.is_file():
+        raise FileNotFoundError(f"找不到输入音频文件: {input_path}")
+
+    # 指定 -o 时，工作目录（放临时分段、底层中间产物）用输出文件所在目录；
+    # 否则用 --dir。最终落点由 separate(output_path=...) 决定。
+    work_dir = str(Path(args.output).parent) if args.output else args.dir
+    kwargs: dict = {
+        "output_dir": work_dir,
+        "output_format": args.format,
+        "segment_size": args.segment_size,
+        "overlap": args.overlap,
+        "segment_minutes": args.segment_minutes,
+        "output_bitrate": args.output_bitrate,
+    }
+    if args.model:
+        kwargs["model_filename"] = args.model
+    separator = VocalSeparator(**kwargs)
+    vocals = separator.separate(str(input_path), output_path=args.output)
+
+    print(f"\n✅ 人声音频已保存到: {vocals}")
+    print("\n💡 提示: 可以把人声音频再交给 subtitle 子命令转字幕，降低 BGM 干扰")
+
+
+def _run_sum(args: argparse.Namespace) -> None:
+    from kits.summarizer import Summarizer, SummarizeError
+
+    print("=" * 60)
+    print("🤖 DeepSeek 字幕总结")
+    print("=" * 60)
+
+    input_path = Path(args.input)
+    if not input_path.is_file():
+        raise FileNotFoundError(f"找不到输入字幕文件: {input_path}")
+
+    sentences = parse_srt(input_path.read_text(encoding="utf-8"))
+    if not sentences:
+        raise RuntimeError(f"未能从 {input_path} 解析出任何字幕")
+    print(f"📄 已读取 {len(sentences)} 条字幕")
+
+    try:
+        summarizer = Summarizer(
+            api_key=args.api_key,
+            model=args.model,
+            preset=args.preset,
+            prompt_file=args.prompt_file,
+            max_chars=args.max_chars,
+        )
+        summary = summarizer.summarize(sentences)
+    except SummarizeError as e:
+        raise SystemExit(f"❌ 总结失败: {e}") from e
+
+    # 默认输出在原名后插入 .summary，扩展名换成 .md
+    output_path = (
+        Path(args.output)
+        if args.output
+        else input_path.with_suffix(".summary.md")
+    )
+    output_path.write_text(summary, encoding="utf-8")
+
+    print(f"\n✅ 总结已保存到: {output_path}")
+    print("\n📝 总结预览:")
+    preview = summary[:500] + ("..." if len(summary) > 500 else "")
+    print(preview)
+
+
 def main(argv: list[str] | None = None) -> None:
+    # Windows 控制台默认 GBK，输出里的 emoji（🎚️ 等）会触发 UnicodeEncodeError
+    # 让整条流水线崩溃。统一把标准流切到 UTF-8（errors=replace 兜底）。
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
     args = build_parser().parse_args(argv)
     if args.command == "download":
         _run_download(args)
@@ -232,6 +463,10 @@ def main(argv: list[str] | None = None) -> None:
         _run_subtitle(args)
     elif args.command == "translate":
         _run_translate(args)
+    elif args.command == "separate":
+        _run_separate(args)
+    elif args.command == "sum":
+        _run_sum(args)
 
 
 if __name__ == "__main__":

@@ -1,40 +1,128 @@
+<div align="center">
+
 # KITS
 
-基于 [openai/whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) 的鹿乃 Twitch 直播总结工具。可以**下载 Twitch 直播**、合并为 MP4 / 提取 MP3，把音频转换成**完整句子、带时间戳的 SRT 字幕文件**，并可调用 **DeepSeek 把日语字幕翻译成中文**。支持 50 系 Nvidia 显卡（CUDA 12.8）。
+_鹿乃 Twitch 直播智能总结_
 
-## 特性
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![Release](https://img.shields.io/github/v/release/kanbereina/KITS?display_name=tag&sort=semver)](https://github.com/kanbereina/KITS/releases)
+[![Python](https://img.shields.io/badge/Python-3.12~3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![CUDA](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
+[![PyTorch](https://img.shields.io/badge/PyTorch-cu128-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
+
+一站式处理鹿乃 Twitch 直播：**下载直播 → 分离人声 → 转写 SRT 日语字幕文件 → 可选转写 SRT 中文字幕文件 → AI 总结**。
+
+</div>
+
+---
+
+## 目录
+
+- [为什么用 KITS](#为什么用-kits-)
+- [功能特性](#功能特性)
+- [安装与部署](#安装与部署)
+  - [环境要求一览](#环境要求一览)
+- [使用方法](#使用方法)
+  - [download：下载 Twitch 直播](#download下载-twitch-直播)
+  - [subtitle：音频转字幕](#subtitle音频转字幕)
+    - [标点恢复（默认开启）](#标点恢复默认开启)
+    - [长音频分段转录](#长音频分段转录)
+    - [剔除游戏播报（--filter-game）](#剔除游戏播报---filter-game)
+  - [translate：日语字幕译中文](#translate日语字幕译中文)
+  - [separate：分离人声](#separate分离人声)
+  - [sum：AI 总结字幕](#sumai-总结字幕)
+  - [示例](#示例)
+- [项目结构](#项目结构)
+- [断句逻辑](#断句逻辑)
+- [支持的音频格式](#支持的音频格式)
+- [输出示例](#输出示例)
+- [常见问题](#常见问题)
+
+## 为什么用 KITS ？
+
+- **一条龙流水线** — 从直播 URL 到中文字幕、AI 总结，全程命令行串联，无需手动倒腾中间文件。
+- **日语识别更准** — 默认 [kotoba-whisper-v2.2](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.2) 蒸馏模型，自动补日语句读后再断句，字幕是完整句子而非碎片。
+- **句子完整不截断** — 长音频按静音切分、分段流式转写，切点落在无人说话处，边转边落盘，精度与整段转写一致。
+- **唱歌场次友好** — 内置 audio-separator 人声分离，长音频自动切段防爆内存、输出比特率对齐原音频，去掉 BGM / 伴奏再识别。
+- **省心的中文化** — DeepSeek 逐条翻译保留时间轴，并能按时间线 / 概述 / 高光 / 歌单等预设一键总结整场直播。
+- **专为 50 系显卡调优** — PyTorch 走 `pytorch-cu128`（CUDA 12.8），onnxruntime 复用 torch 自带 CUDA 运行时，开箱即用 GPU 加速。
+
+## 功能特性
 
 - 🐙 异步并发下载 Twitch 直播 TS 分片，自动探测视频长度，合并为 MP4
 - 🎵 可选提取 MP3 音频，可选保留 / 清理临时 TS 文件
-- 🎤 使用 Whisper large-v3-turbo 进行语音识别，速度快、精度高
-- ✂️ **单词级时间戳**断句，按句末标点 / 停顿 / 长度上限智能切分，保证句子完整不被拦腰截断
+- 🎤 使用 Whisper 进行语音识别，默认 `kotoba-whisper-v2.2`（日语识别更准的蒸馏模型）
+- ✂️ 句子级断句，按句末标点 / 停顿 / 长度上限智能切分，保证句子完整不被拦腰截断
+- ✒️ 蒸馏模型只产短语级时间戳且不带标点，自动用标点模型补日语句读（。！？）后再断句，时间戳原样保留
 - 🪓 长音频**按静音切分、分段流式转录**：实时进度、边转边写盘，切点落在无人说话处，精度不受影响
 - 🔗 下载与字幕一条龙：一条命令从直播 URL 直达 SRT 字幕
 - 🌐 调用 DeepSeek 把日语 SRT 翻译成中文 SRT，逐条对应、保留原时间轴
+- 🤖 调用 DeepSeek 对 SRT 字幕做 AI 总结，提示词走 JSON 预设（时间线 / 概述 / 高光 / 歌单），长字幕自动分块
+- 🎚️ 用 audio-separator 分离人声，可单独导出，也可在转录前 `--separate` 预处理去掉 BGM / 唱歌干扰
 - 🧹 自动清理重复字符与乱码，并抑制模型的幻觉式重复
 - 🎮 可选剔除 VALORANT 游戏内系统播报 / 技能语音（如「残り1名」「グレネード配置」），让字幕聚焦主播人声
 - 📄 输出标准 SRT，可直接拖入播放器或视频剪辑软件
 
-## 环境要求
+## 安装与部署
 
-- Python 3.12 ~ 3.14
-- 支持 CUDA 的 Nvidia 显卡（转录字幕时强制要求 GPU；仅下载视频则不需要）
-- CUDA 12.8（PyTorch 从 `pytorch-cu128` 源安装）
-- [ffmpeg](https://ffmpeg.org/download.html)（合并 MP4、提取 MP3 需要，须在 PATH 中）
-- 已安装 [uv](https://docs.astral.sh/uv/)
+按以下步骤从零部署，全程约几分钟（不含模型下载）：
 
-## 安装
+**1. 准备系统依赖**
+
+- [uv](https://docs.astral.sh/uv/)（包管理 + 运行器）— 装好后 `uv --version` 应有输出
+- [ffmpeg](https://ffmpeg.org/download.html) — 须在 PATH 中，`ffmpeg -version` 应有输出（合并 MP4 / 提取 MP3 / 音频切分都依赖它）
+- Nvidia 显卡驱动 — 转字幕、分离人声需要，`nvidia-smi` 应能看到显卡
+
+**2. 克隆并同步依赖**
 
 ```bash
-# 克隆仓库后，在项目根目录同步依赖
-uv sync
+git clone https://github.com/kanbereina/KITS.git
+cd KITS
+uv sync              # 创建虚拟环境并装齐所有依赖（含 dev 组）
 ```
 
-首次运行会自动从 Hugging Face 下载模型（约几个 GB），需要联网。下载后会走本地缓存。
+`uv sync` 会自动从 `pytorch-cu128` 源装好 CUDA 12.8 版 PyTorch，以及 audio-separator（含 onnxruntime-gpu）、punctuators 等。无需手动装 CUDA Toolkit——onnxruntime 复用 torch 自带的 CUDA 运行时。
+
+**3. 验证安装**
+
+```bash
+uv run kits --help          # 看到子命令说明即安装成功
+uv run python -c "import torch; print('CUDA:', torch.cuda.is_available())"  # 应输出 CUDA: True
+```
+
+**4.（可选）配置 DeepSeek**
+
+`translate` / `sum` 需要 DeepSeek API Key，使用命令时传入或设置环境变量：
+
+```bash
+export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY="sk-xxxx"
+```
+
+> 首次运行转字幕会自动从 Hugging Face 下载模型（kotoba-whisper 约几个 GB + 标点模型约 1GB），需要联网；之后走本地缓存。
+
+### 环境要求一览
+
+| 项 | 要求 | 说明 |
+| --- | --- | --- |
+| Python | 3.12 ~ 3.14 | 由 uv 管理虚拟环境 |
+| GPU | 支持 CUDA 的 Nvidia 显卡 | 转字幕 / 分离人声强制要求；仅下载不需要 |
+| CUDA | 12.8 | PyTorch 从 `pytorch-cu128` 源安装，勿换 PyPI 默认源 |
+| ffmpeg | 在 PATH 中 | 合并 MP4、提取 MP3、音频切分 |
+| API Key | DeepSeek（可选） | 仅 `translate` / `sum` 需要 |
 
 ## 使用方法
 
-工具提供三个子命令:`download`（下载直播）、`subtitle`（音频转字幕）和 `translate`（日语字幕译中文）。
+工具提供五个子命令:`download`（下载直播）、`subtitle`（音频转字幕）、`translate`（日语字幕译中文）、`separate`（人声分离）和 `sum`（AI 总结字幕）。
+
+| 命令 | 用途 | 最简示例 | 需 GPU | 需 API Key |
+| --- | --- | --- | :---: | :---: |
+| [`download`](#download下载-twitch-直播) | 下载 Twitch 直播，合并 MP4 / 提取 MP3 | `uv run kits download "<ts_url>" -o name` | 否¹ | 否 |
+| [`subtitle`](#subtitle音频转字幕) | 音频转带时间戳的 SRT 字幕 | `uv run kits subtitle -i audio.mp3` | 是 | 否 |
+| [`translate`](#translate日语字幕译中文) | 日语 SRT 翻译成中文 SRT | `uv run kits translate -i live.srt` | 否 | 是 |
+| [`separate`](#separate分离人声) | 从音频分离出人声，去 BGM / 伴奏 | `uv run kits separate -i audio.mp3` | 是 | 否 |
+| [`sum`](#sumai-总结字幕) | 对 SRT 做 AI 总结（时间线 / 歌单等） | `uv run kits sum -i live.srt` | 否 | 是 |
+
+> ¹ `download` 本身不需要 GPU；但加 `--srt`（下载后自动转字幕）会调用 Whisper，需要 GPU。
 
 ### download：下载 Twitch 直播
 
@@ -97,6 +185,30 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | `--silence-db` | `-30.0` | 静音判定响度阈值（dB），越负越宽松 |
 | `--min-silence` | `0.5` | 最短静音时长（秒），短于此不算切点 |
 | `--filter-game` | 关闭 | 剔除指定游戏的播报 / 技能语音，按游戏名启用、可多次指定（整条完全匹配才删） |
+| `--separate` | 关闭 | 转录前先用 audio-separator 分离人声（去 BGM / 唱歌干扰，需安装 audio-separator + GPU） |
+| `--separate-model` | `UVR-MDX-NET_Main_427.onnx` | 人声分离模型文件名，仅在 `--separate` 时生效 |
+| `--separate-segment-size` | `512` | 人声分离分块大小，越大越快越吃显存，仅在 `--separate` 时生效 |
+| `--separate-overlap` | `0.1` | 人声分离分块重叠（0~1），越小越快，仅在 `--separate` 时生效 |
+| `--separate-segment-minutes` | `15` | 人声分离长音频切段时长（分钟），防爆内存（`<=0` 关闭），仅在 `--separate` 时生效 |
+| `--separate-output-bitrate` | 自动对齐原音频 | 人声输出比特率（如 `128k`），无损格式忽略，仅在 `--separate` 时生效 |
+| `--no-punctuate` | （默认补标点） | 关闭标点恢复；模型本身已输出标点时可关 |
+| `--punct-model` | xlm-roberta 日语句读 | 标点恢复模型 |
+
+#### 标点恢复（默认开启）
+
+默认模型 `kotoba-whisper-v2.2` 是蒸馏模型，日语识别更准，但只产出**短语级时间戳且不带句末标点**。无标点会让断句只能靠长度上限硬切，字幕被压成一条条 15 秒的长块。
+
+为此转录后会自动用标点模型（kotoba 官方同款 [xlm-roberta 日语句读模型](https://huggingface.co/1-800-BAD-CODE/xlm-roberta_punctuation_fullstop_truecase)）给每个短语补上 `。！？、`，**时间戳原样保留**，让断句在句末标点处自然切开。实测一段 120 秒音频，补标点后字幕从 7 条细化到 19 条、被硬切的从 5 条降到 2 条。
+
+```bash
+# 默认补标点，无需额外参数
+uv run kits subtitle -i live.mp3
+
+# 若换用本身已带标点的模型，可关闭标点恢复
+uv run kits subtitle -i live.mp3 --no-punctuate
+```
+
+首次运行会下载标点模型（约 1GB）。标点模型在 CPU 上即可快速推理。
 
 #### 长音频分段转录
 
@@ -158,6 +270,77 @@ uv run kits translate -i live.srt -o live_cn.srt --api-key sk-xxxx
 
 > 翻译只替换文本、保留时间戳。字幕按批发送给模型逐条翻译，某条译文缺失时会回退保留原日语，避免时间轴错位。
 
+### separate：分离人声
+
+用 [audio-separator](https://github.com/nomadkaraoke/python-audio-separator)（UVR/MDX 模型）从音频中分离出人声，去掉 BGM / 伴奏。适合鹿乃唱歌场次：先分离人声再转录，可显著降低背景音乐对识别的干扰。默认模型 `UVR-MDX-NET_Main_427.onnx`（MDX 架构，走 onnxruntime GPU 加速）。
+
+```bash
+# 分离人声，默认输出 MP3 到 output/（原名_(Vocals).mp3）
+uv run kits separate -i live.mp3
+
+# 直接指定输出文件路径（与其他命令一致，-o 给文件名）
+uv run kits separate -i live.mp3 -o vocals.mp3
+
+# 指定格式与模型
+uv run kits separate -i live.mp3 -o vocals.wav --model Kim_Vocal_2.onnx
+```
+
+首次运行会自动下载分离模型。需要 CUDA GPU 与 `audio-separator[gpu]`（已在依赖中，`uv sync` 即装）。
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-i, --input` | （必填） | 输入音频文件路径 |
+| `-o, --output` | `--dir/原名_(Vocals).格式` | 输出人声文件路径，指定时输出格式按其扩展名 |
+| `--dir` | `output` | 人声输出目录（未指定 `-o` 时生效） |
+| `--model` | `UVR-MDX-NET_Main_427.onnx` | 分离模型文件名（audio-separator 模型库中的文件名） |
+| `--format` | `MP3` | 输出音频格式（WAV / MP3 / FLAC 等） |
+| `--segment-size` | `512` | 分块大小，越大越快越吃显存（显存紧张可降到 256） |
+| `--overlap` | `0.1` | MDX(.onnx) 分块重叠（0~1），越小越快、接缝质量略降 |
+| `--segment-minutes` | `15` | 长音频按此时长（分钟）切段逐段分离再合并，防爆内存（`<=0` 关闭） |
+| `--output-bitrate` | 自动对齐原音频 | 输出比特率（如 `128k`），默认探测原音频并向上取整到 2 的幂；无损格式忽略 |
+
+> 长音频（如 4 小时录播）一次性分离会撑爆内存，故默认按 `--segment-minutes` 切段、逐段分离再用 ffmpeg 无缝合并；中间产物为无损 WAV，最终只编码一次。输出比特率默认对齐原音频（人声分离后内容简单，不超过原始比特率即可保真），避免固定高码率导致文件虚大。
+>
+> 也可以不单独跑 `separate`，直接在 `subtitle` / `download` 上加 `--separate`，转录前自动分离人声。
+
+### sum：AI 总结字幕
+
+把已有 SRT 字幕交给 DeepSeek 做总结，方便快速回顾整场直播。提示词走 JSON 预设，长字幕会自动分块总结再合并。需要 DeepSeek API Key：
+
+```bash
+export DEEPSEEK_API_KEY=sk-xxxx
+
+# 默认预设（timeline，时间线分段总结），输出到 live.summary.md
+uv run kits sum -i live.srt
+
+# 指定预设：summary 概述 / highlights 高光 / setlist 歌单
+uv run kits sum -i live.srt --preset setlist -o setlist.md
+
+# 用自定义提示词 JSON 覆盖内置预设
+uv run kits sum -i live.srt --prompt-file my_prompts.json --preset mine
+```
+
+内置预设：
+
+| 预设 | 说明 |
+| --- | --- |
+| `timeline` | 按话题分段、每段带时间戳的时间线总结（默认） |
+| `summary` | 几段连贯文字的整体概述 |
+| `highlights` | 高光时刻 / 要点列表，带时间戳 |
+| `setlist` | 歌单提取，识别演唱的歌曲并按时间列出 |
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-i, --input` | （必填） | 输入 SRT 字幕文件路径 |
+| `-o, --output` | `原名.summary.md` | 输出总结文件路径 |
+| `--api-key` | 读环境变量 | DeepSeek API Key，缺省读 `DEEPSEEK_API_KEY` |
+| `--model` | `deepseek-chat` | DeepSeek 模型名 |
+| `--preset` | 配置 default | 总结预设名（`timeline` / `summary` / `highlights` / `setlist`） |
+| `--prompt-file` | 无 | 自定义提示词 JSON，覆盖内置预设 |
+| `--max-chars` | `8000` | 单块送审最大字符数，超长字幕按此分块 |
+
+> 自定义提示词 JSON 格式：顶层 `presets` 是「预设名 → {description, system}」字典，可选 `default`（默认预设名）和 `reduce_system`（多块合并时的提示词）。用户预设与内置预设浅合并，同名覆盖。
+
 ### 示例
 
 ```bash
@@ -172,38 +355,53 @@ uv run kits subtitle -i live_2026.mp3 --filter-game valorant
 
 # 转录英语内容
 uv run kits subtitle -i talk.mp3 --language english
+
+# 唱歌场次：先分离人声再转录，降低 BGM 干扰
+uv run kits subtitle -i live_2026.mp3 --separate
+
+# 转录完后做一份时间线总结，方便回顾
+uv run kits sum -i live_2026.srt
+
+# 提取整场直播的歌单
+uv run kits sum -i live_2026.srt --preset setlist
 ```
 
 ## 项目结构
 
 ```
 src/kits/
-  __init__.py      # 包入口，导出字幕相关 API
+  __init__.py      # 包入口，导出字幕相关纯逻辑 API
   subtitle.py      # 纯逻辑：单词时间戳 -> 完整句子 -> SRT，含 SRT 解析与增量写入（无 torch 依赖，可单测）
   filters.py       # 纯逻辑：剔除游戏内系统播报 / 技能语音（无 torch 依赖，可单测）
-  transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按静音切分、分段流式产出词级时间戳
+  deepseek.py      # 公共 DeepSeek 客户端：鉴权 + HTTP + 错误处理（仅 httpx，translate/sum 共用）
+  transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按静音切分、分段流式产出 chunk 级时间戳
+  punctuator.py    # 标点恢复：给无标点的转录 chunk 补日语句读（延迟导入 punctuators），时间戳不变
   downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
-  translator.py    # 调用 DeepSeek 把日语 SRT 翻译成中文 SRT（仅依赖 httpx）
-  cli.py           # 命令行入口（download / subtitle / translate 子命令）
+  translator.py    # 调用 DeepSeek 把日语 SRT 翻译成中文 SRT（经 deepseek 客户端）
+  separator.py     # 人声分离：封装 audio-separator（延迟导入，默认只出 Vocals 轨）
+  summarizer.py    # 调用 DeepSeek 总结 SRT，提示词走 JSON 预设、长字幕 map-reduce 分块
+  prompts.json     # 内置总结提示词预设（timeline / summary / highlights / setlist）
+  cli.py           # 命令行入口（download / subtitle / translate / separate / sum 子命令）
 main.py            # 薄入口，委托给 kits.cli
 ```
 
 各模块职责清晰、相互解耦:
 
 - `downloader.TwitchDownloader` 下载并合并直播，产出 MP4 / MP3，不依赖 torch
-- `transcriber.Transcriber.transcribe()` 把音频转成单词级时间戳列表；`transcribe_segmented()` 按静音切分长音频、分段流式产出
+- `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；`transcribe_segmented()` 按静音切分长音频、分段流式产出
+- `punctuator.Punctuator.restore()` 给无标点的 chunk 补日语句读，时间戳不变（延迟导入重依赖）
 - `subtitle.segment_sentences()` 负责断句、`write_srt()` / `SrtWriter` 负责落盘（后者支持分段增量写）、`parse_srt()` 负责把 SRT 读回句子列表
-- `translator.DeepSeekTranslator.translate()` 把句子列表逐批译成中文，仅依赖 httpx
-- `cli` 把它们串成流水线：`download --srt` 即「下载 -> 提取音频 -> 转字幕」
-
-后续接入 **DeepSeek 总结分析** 时，只需在 `src/kits/` 下新增 `summarizer.py`，吃 `transcriber` 的文本或 `subtitle` 的句子即可，并在 `cli` 中加一个 `summarize` 子命令。
+- `deepseek.DeepSeekClient` 集中 DeepSeek 鉴权与请求；`translator.DeepSeekTranslator` 与 `summarizer.Summarizer` 复用它
+- `separator.VocalSeparator.separate()` 用 audio-separator 分离人声（延迟导入重依赖）
+- `summarizer.Summarizer.summarize()` 按预设提示词总结字幕，长字幕分块再合并
+- `cli` 把它们串成流水线：`download --srt` 即「下载 -> 提取音频 -> 转字幕」，`subtitle --separate` 即「分离人声 -> 转字幕」
 
 ## 断句逻辑
 
 字幕按以下优先级切分句子，确保完整性:
 
-1. **句末标点**：遇到 `。！？」` 等结尾标点即认为一句结束
-2. **停顿**：与上一个词的间隔超过 `--max-gap` 时断句
+1. **句末标点**：遇到 `。！？」` 等结尾标点即认为一句结束（蒸馏模型无标点时，先经标点恢复补上）
+2. **停顿**：与上一段的间隔超过 `--max-gap` 时断句
 3. **长度上限**：超过 `--max-chars` 或 `--max-duration` 时，优先在逗号/读点处切开，避免单条字幕过长
 
 ## 支持的音频格式
