@@ -16,6 +16,28 @@ _鹿乃 Twitch 直播智能总结_
 
 ---
 
+## 目录
+
+- [为什么用 KITS](#为什么用-kits-)
+- [功能特性](#功能特性)
+- [安装与部署](#安装与部署)
+  - [环境要求一览](#环境要求一览)
+- [使用方法](#使用方法)
+  - [download：下载 Twitch 直播](#download下载-twitch-直播)
+  - [subtitle：音频转字幕](#subtitle音频转字幕)
+    - [标点恢复（默认开启）](#标点恢复默认开启)
+    - [长音频分段转录](#长音频分段转录)
+    - [剔除游戏播报（--filter-game）](#剔除游戏播报---filter-game)
+  - [translate：日语字幕译中文](#translate日语字幕译中文)
+  - [separate：分离人声](#separate分离人声)
+  - [sum：AI 总结字幕](#sumai-总结字幕)
+  - [示例](#示例)
+- [项目结构](#项目结构)
+- [断句逻辑](#断句逻辑)
+- [支持的音频格式](#支持的音频格式)
+- [输出示例](#输出示例)
+- [常见问题](#常见问题)
+
 ## 为什么用 KITS ？
 
 - **一条龙流水线** — 从直播 URL 到中文字幕、AI 总结，全程命令行串联，无需手动倒腾中间文件。
@@ -41,28 +63,66 @@ _鹿乃 Twitch 直播智能总结_
 - 🎮 可选剔除 VALORANT 游戏内系统播报 / 技能语音（如「残り1名」「グレネード配置」），让字幕聚焦主播人声
 - 📄 输出标准 SRT，可直接拖入播放器或视频剪辑软件
 
-## 环境要求
+## 安装与部署
 
-- Python 3.12 ~ 3.14
-- 支持 CUDA 的 Nvidia 显卡（转录字幕、分离人声时强制要求 GPU；仅下载视频则不需要）
-- CUDA 12.8（PyTorch 从 `pytorch-cu128` 源安装）
-- [ffmpeg](https://ffmpeg.org/download.html)（合并 MP4、提取 MP3 需要，须在 PATH 中）
-- [audio-separator](https://github.com/nomadkaraoke/python-audio-separator)（人声分离用，已在依赖中随 `uv sync` 安装，含 onnxruntime-gpu）
-- [punctuators](https://github.com/1-800-BAD-CODE/punctuators)（标点恢复用，已在依赖中随 `uv sync` 安装）
-- 已安装 [uv](https://docs.astral.sh/uv/)
+按以下步骤从零部署，全程约几分钟（不含模型下载）：
 
-## 安装
+**1. 准备系统依赖**
+
+- [uv](https://docs.astral.sh/uv/)（包管理 + 运行器）— 装好后 `uv --version` 应有输出
+- [ffmpeg](https://ffmpeg.org/download.html) — 须在 PATH 中，`ffmpeg -version` 应有输出（合并 MP4 / 提取 MP3 / 音频切分都依赖它）
+- Nvidia 显卡驱动 — 转字幕、分离人声需要，`nvidia-smi` 应能看到显卡
+
+**2. 克隆并同步依赖**
 
 ```bash
-# 克隆仓库后，在项目根目录同步依赖
-uv sync
+git clone https://github.com/kanbereina/KITS.git
+cd KITS
+uv sync              # 创建虚拟环境并装齐所有依赖（含 dev 组）
 ```
 
-首次运行会自动从 Hugging Face 下载模型（约几个 GB），需要联网。下载后会走本地缓存。
+`uv sync` 会自动从 `pytorch-cu128` 源装好 CUDA 12.8 版 PyTorch，以及 audio-separator（含 onnxruntime-gpu）、punctuators 等。无需手动装 CUDA Toolkit——onnxruntime 复用 torch 自带的 CUDA 运行时。
+
+**3. 验证安装**
+
+```bash
+uv run kits --help          # 看到子命令说明即安装成功
+uv run python -c "import torch; print('CUDA:', torch.cuda.is_available())"  # 应输出 CUDA: True
+```
+
+**4.（可选）配置 DeepSeek**
+
+`translate` / `sum` 需要 DeepSeek API Key，使用命令时传入或设置环境变量：
+
+```bash
+export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY="sk-xxxx"
+```
+
+> 首次运行转字幕会自动从 Hugging Face 下载模型（kotoba-whisper 约几个 GB + 标点模型约 1GB），需要联网；之后走本地缓存。
+
+### 环境要求一览
+
+| 项 | 要求 | 说明 |
+| --- | --- | --- |
+| Python | 3.12 ~ 3.14 | 由 uv 管理虚拟环境 |
+| GPU | 支持 CUDA 的 Nvidia 显卡 | 转字幕 / 分离人声强制要求；仅下载不需要 |
+| CUDA | 12.8 | PyTorch 从 `pytorch-cu128` 源安装，勿换 PyPI 默认源 |
+| ffmpeg | 在 PATH 中 | 合并 MP4、提取 MP3、音频切分 |
+| API Key | DeepSeek（可选） | 仅 `translate` / `sum` 需要 |
 
 ## 使用方法
 
 工具提供五个子命令:`download`（下载直播）、`subtitle`（音频转字幕）、`translate`（日语字幕译中文）、`separate`（人声分离）和 `sum`（AI 总结字幕）。
+
+| 命令 | 用途 | 最简示例 | 需 GPU | 需 API Key |
+| --- | --- | --- | :---: | :---: |
+| [`download`](#download下载-twitch-直播) | 下载 Twitch 直播，合并 MP4 / 提取 MP3 | `uv run kits download "<ts_url>" -o name` | 否¹ | 否 |
+| [`subtitle`](#subtitle音频转字幕) | 音频转带时间戳的 SRT 字幕 | `uv run kits subtitle -i audio.mp3` | 是 | 否 |
+| [`translate`](#translate日语字幕译中文) | 日语 SRT 翻译成中文 SRT | `uv run kits translate -i live.srt` | 否 | 是 |
+| [`separate`](#separate分离人声) | 从音频分离出人声，去 BGM / 伴奏 | `uv run kits separate -i audio.mp3` | 是 | 否 |
+| [`sum`](#sumai-总结字幕) | 对 SRT 做 AI 总结（时间线 / 歌单等） | `uv run kits sum -i live.srt` | 否 | 是 |
+
+> ¹ `download` 本身不需要 GPU；但加 `--srt`（下载后自动转字幕）会调用 Whisper，需要 GPU。
 
 ### download：下载 Twitch 直播
 
