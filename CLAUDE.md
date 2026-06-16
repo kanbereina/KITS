@@ -33,6 +33,11 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - 合并 MP4、提取 MP3 依赖系统 `ffmpeg`，须在 PATH 中。
 - `translate` / `sum` 需要 DeepSeek API Key，走 `--api-key` 或环境变量 `DEEPSEEK_API_KEY`。
 - `separate` 依赖 `audio-separator[gpu]`（含 onnxruntime-gpu），首次运行会下载分离模型；同样要 CUDA GPU。
+- **onnxruntime GPU 加速的两个坑**（`.onnx`/MDX 模型走 onnxruntime，`.ckpt`/MDXC roformer 走 torch）：
+  1. `punctuators` 间接依赖 **CPU 版 `onnxruntime`**，会和 `audio-separator[gpu]` 的 `onnxruntime-gpu` 装进同一个 `onnxruntime/` 目录、CPU 版 dll 顶掉 GPU 版，导致 `CUDAExecutionProvider` 丢失、`.onnx` 分离静默退回 CPU（慢数倍）。靠 `pyproject.toml` 的 `[tool.uv] override-dependencies = ["onnxruntime ; sys_platform == 'never'"]` 禁止 CPU 版被装入。改完需 `uv sync --reinstall-package onnxruntime-gpu` 恢复被覆盖的 GPU dll。
+  2. onnxruntime-gpu 需要 `cublasLt64_12.dll` / `cudnn64_9.dll` 等 CUDA12/cuDNN9 运行时；本机不装独立 CUDA Toolkit，靠 `separator._expose_torch_cuda_dlls()` 在 import onnxruntime 前把 `torch/lib`（torch cu128 自带这些 dll）加进 DLL 搜索路径复用。
+- **Windows GBK 终端**下输出 emoji（🎚️ 等）会 `UnicodeEncodeError` 崩溃，`cli.main()` 开头把 stdout/stderr `reconfigure` 成 UTF-8 兜底。新增带 emoji 的 print 不必担心，但别在 main 之外的早期路径打 emoji。
+- 人声分离加速参数（`separate` / `subtitle --separate` 共用，后者加 `--separate-` 前缀）：`--segment-size`（默认 512，越大越快越吃显存）、`--overlap`（MDX 用 0~1 小数，默认 0.1；MDXC roformer 是整数步数，语义不同，代码里分开传）、`--segment-minutes`、`--output-bitrate`。注意 MDX 路径里 `batch_size` 基本无效（每次循环只 1 个 chunk），真正提速靠 segment_size/overlap。
 
 ## 架构
 
@@ -45,7 +50,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - `punctuator.py` — `Punctuator`，给无标点的转录 chunk 批量补日语句读（。！？），**时间戳原样保留**。复用 kotoba 官方同款标点模型（punctuators 库 `PunctCapSegModelONNX`）。蒸馏模型 chunk 不带句末标点会使 `segment_sentences` 的标点断句失效，补标点后才能在 chunk 边界正常断句。重依赖 punctuators（ONNX），**延迟导入**。
 - `downloader.py` — `TwitchDownloader`，异步下载 TS 分片 → ffmpeg 合并 MP4 → 可选提取 MP3。仅依赖 httpx + ffmpeg，**不依赖 torch**。
 - `translator.py` — `DeepSeekTranslator`，经 `deepseek.DeepSeekClient` 把日语句子逐批译成中文。`TranslationError` 继承 `DeepSeekError`（保留历史契约）。
-- `separator.py` — `VocalSeparator`，封装 audio-separator 分离人声（默认只出 Vocals 轨）。重依赖 audio-separator（含 torch/onnxruntime），**延迟导入**（`load()` 内才 import）。
+- `separator.py` — `VocalSeparator`，封装 audio-separator 分离人声（默认只出 Vocals 轨）。重依赖 audio-separator（含 torch/onnxruntime），**延迟导入**（`load()` 内才 import）。底层统一产出**无损 WAV** 作中间产物，最终格式/比特率由 `_encode_final` 用 ffmpeg 一次性套用。长音频按 `segment_minutes`（默认 15）切段→逐段分离→ffmpeg concat 合并，避免一次性出整轨爆内存。比特率默认对齐原音频（探音频流比特率 → 向上取整到 2 的幂 kbps、夹 [32,320]、留 5% 容差吸收 MP3 标称偏差），`--output-bitrate` 可覆盖；无损格式忽略比特率。
 - `summarizer.py` — `Summarizer`，经 `deepseek.DeepSeekClient` 对 SRT 做 AI 总结。提示词走 JSON 预设（包内 `prompts.json` + 用户 `--prompt-file` 覆盖），长字幕 map-reduce 分块。纯逻辑（`load_presets` / `resolve_preset` / `format_sentences` / `chunk_sentences`）不触网、可单测。
 - `prompts.json` — 内置总结提示词预设（timeline / summary / highlights / setlist）+ `reduce_system` 合并提示词，随包发布。
 - `cli.py` — argparse 子命令 `download` / `subtitle` / `translate` / `separate` / `sum`，把各模块串成流水线。
@@ -54,7 +59,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 
 - 转字幕：`downloader`(MP3) →（可选 `separator` 分离人声）→ `transcriber.transcribe_segmented()`（按静音分段，逐段产出 chunk 级 list[Word]）→（可选 `punctuator.restore()` 补标点）→ 每段 `subtitle.segment_sentences()`(list[Sentence]) → `subtitle.SrtWriter.append()` 增量写盘。`_audio_to_srt` 是这条流水线，`_maybe_separate` 按 `--separate` 决定是否预处理人声，标点恢复默认开启（`--no-punctuate` 关闭）。
 - 译字幕：SRT 文件 → `subtitle.parse_srt()`(list[Sentence]) → `translator.translate()`(中文 list[Sentence]) → `subtitle.write_srt()`。
-- 分离人声：音频 → `separator.VocalSeparator.separate()` → 人声音频文件（可再交给 subtitle）。
+- 分离人声：音频 →（长音频先按 `segment_minutes` 切段）→ `separator.VocalSeparator.separate()`（逐段分离出无损 WAV → ffmpeg concat 合并 → 按目标格式/比特率编码）→ 人声音频文件（可再交给 subtitle）。
 - 总结：SRT 文件 → `subtitle.parse_srt()` → `summarizer.format_sentences/chunk_sentences` → `summarizer.Summarizer.summarize()`（按预设逐块总结，多块再 reduce 合并）→ Markdown 文件。
 
 关键约定：
@@ -72,4 +77,5 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - **新增总结预设**：直接在 `src/kits/prompts.json` 的 `presets` 里加一项（含 `description` + `system`），或让用户用 `--prompt-file` 传外部 JSON 覆盖，无需改代码。
 - **新增游戏播报过滤**：在 `filters.py` 的 `GAME_CALLOUTS` / `_GAME_ALIASES` 登记词表与别名。
 - **新增 DeepSeek 能力**：复用 `deepseek.DeepSeekClient`，在 `cli.py` 加子命令（沿用延迟导入，参考 `translate` / `sum`）。
-- **换人声分离模型**：`separate --model <文件名>` 或 `subtitle --separate --separate-model <文件名>`，模型名走 audio-separator 的模型库。
+- **换人声分离模型**：`separate --model <文件名>` 或 `subtitle --separate --separate-model <文件名>`，模型名走 audio-separator 的模型库（`uv run audio-separator --list_models` 查可用名）。`.onnx`/MDX 走 onnxruntime GPU、`.ckpt`/MDXC roformer 走 torch GPU，两条链路的加速参数语义不同（见「注意」段）。
+- **调人声分离速度/体积**：慢先确认 onnxruntime 走的是 GPU（`uv run python -c "import onnxruntime;print(onnxruntime.get_available_providers())"` 应含 `CUDAExecutionProvider`）；再调 `--segment-size` / `--overlap`。长音频爆内存调小 `--segment-minutes`。输出体积靠 `--output-bitrate`（默认已对齐原音频）。
