@@ -33,7 +33,7 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
     # 长音频分段转录（按静音切分）。短音频会自动整段转录。
     parser.add_argument("--target-chunk", type=float, default=300.0, help="分段目标时长(秒)")
     parser.add_argument("--max-chunk", type=float, default=600.0, help="单段硬上限时长(秒)")
-    parser.add_argument("--silence-db", type=float, default=-30.0, help="静音判定响度阈值(dB)")
+    parser.add_argument("--silence-db", type=float, default=-45.0, help="静音判定响度阈值(dB)，越负越严格")
     parser.add_argument("--min-silence", type=float, default=0.5, help="最短静音时长(秒)")
     parser.add_argument(
         "--filter-game",
@@ -386,11 +386,10 @@ def _run_separate(args: argparse.Namespace) -> None:
     if not input_path.is_file():
         raise FileNotFoundError(f"找不到输入音频文件: {input_path}")
 
-    # 指定 -o 时，工作目录（放临时分段、底层中间产物）用输出文件所在目录；
-    # 否则用 --dir。最终落点由 separate(output_path=...) 决定。
-    work_dir = str(Path(args.output).parent) if args.output else args.dir
+    # output_dir 仅用于未指定 -o 时派生默认输出名；中间产物统一进 .cache（见
+    # separator），不再借用输出目录，故这里直接用 --dir。
     kwargs: dict = {
-        "output_dir": work_dir,
+        "output_dir": args.dir,
         "output_format": args.format,
         "segment_size": args.segment_size,
         "overlap": args.overlap,

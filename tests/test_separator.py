@@ -18,6 +18,7 @@ class TestConstruction:
         sys.modules.pop("audio_separator", None)
         sep = VocalSeparator(output_dir="out")
         assert sep.output_dir == "out"
+        assert sep.cache_dir == ".cache"
         assert sep.model_filename == DEFAULT_MODEL
         assert "audio_separator" not in sys.modules
 

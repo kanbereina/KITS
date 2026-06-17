@@ -65,11 +65,11 @@ def probe_duration(audio_file: str) -> float:
 
 
 def detect_silences(
-    audio_file: str, noise_db: float = -30.0, min_silence: float = 0.5
+    audio_file: str, noise_db: float = -45.0, min_silence: float = 0.5
 ) -> list[tuple[float, float]]:
     """用 ffmpeg silencedetect 探测静音区间，返回 [(start, end), ...]（秒）。
 
-    noise_db: 低于该响度视为静音（越接近 0 越严格，越负越宽松）。
+    noise_db: 音量低于该响度视为静音（越负越严格、检出静音越少，越接近 0 越宽松）。
     min_silence: 最短静音时长，短于此不计入。
     """
     cmd = [
@@ -243,7 +243,7 @@ class Transcriber:
         beams: int = 3,
         target_chunk: float = 300.0,
         max_chunk: float = 600.0,
-        noise_db: float = -30.0,
+        noise_db: float = -45.0,
         min_silence: float = 0.5,
     ) -> Iterator[list[Word]]:
         """按静音切分长音频，逐段转录并产出（已对齐全局时间轴的）词列表。
