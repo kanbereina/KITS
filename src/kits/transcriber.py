@@ -230,6 +230,7 @@ class Transcriber:
         _silence_warnings()
         if self.device is None:
             self.device = require_cuda()
+        print(f"🤖 使用模型: {self.model_id}")
 
         print("\n📥 检查/下载模型...")
         try:
@@ -242,7 +243,7 @@ class Transcriber:
         self._pipe = pipeline(
             "automatic-speech-recognition",
             model=self.model_id,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,  # 沿用前面的精度设置（GPU 用 float16，CPU 用 float32）
+            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,  # 精度（GPU float16 / CPU float32）。transformers 5.x 用 dtype，旧名 torch_dtype 已弃用
             device=self.device,
             chunk_length_s=15,
             model_kwargs = {"attn_implementation": "sdpa"} if torch.cuda.is_available() else {},  # 传入注意力实现配置（GPU 时启用 sdpa）
@@ -269,12 +270,12 @@ class Transcriber:
             audio_file,
             return_timestamps=True,
             generate_kwargs={
-                # 不强制 language/task：kotoba-whisper 是日语单语蒸馏模型，原生按日语解码，
-                # 其 generation_config 已固定语言；显式传 language 在部分蒸馏权重上会触发
-                # 强制 decoder 前缀告警/异常。故 language 形参对本模型实为无操作（保留以兼容
-                # CLI 契约与未来换多语模型）。换回多语模型（如 large-v3）时再放开下面两行。
-                # "language": language,
-                # "task": "transcribe",
+                # 固定日语转录：kotoba-whisper 的 generation_config 是 is_multilingual=true 且
+                # forced_decoder_ids 的语言槽为 null（不固定语言），不传则每段先做语种自动检测——
+                # 对含唱歌/BGM/日英混杂的直播易误判语种、那一段质量骤降。官方 kotoba_whisper.py
+                # 同样硬编码 language="ja"/task="transcribe"，这里对齐之，消除误判与相关弃用告警。
+                "language": language,
+                "task": "transcribe",
                 "num_beams": beams,
                 # 抑制相同 n-gram 的无限循环（幻觉）
                 "no_repeat_ngram_size": 3,
