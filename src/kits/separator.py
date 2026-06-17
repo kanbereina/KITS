@@ -167,8 +167,12 @@ class VocalSeparator:
         overlap: float = 0.1,
         segment_minutes: float = 15.0,
         output_bitrate: str | None = None,
+        cache_dir: str = ".cache",
     ):
         self.output_dir = output_dir
+        # 所有中间产物（切片、底层分离出的裸 WAV）统一落在此目录下的临时工作目录，
+        # 与最终输出位置解耦，避免裸文件漏进当前目录 / 输出目录。默认 cwd 下的 .cache。
+        self.cache_dir = cache_dir
         self.model_filename = model_filename
         self.output_format = output_format
         self.model_file_dir = model_file_dir
@@ -198,8 +202,10 @@ class VocalSeparator:
         # 底层统一输出无损 WAV：作为中间产物，最终格式/比特率由 _encode_final 一次性
         # 套用，避免分段方案里反复有损压缩叠加损质，也绕开 output_bitrate 在 load()
         # 固化、运行时改不动的限制。
+        # output_dir 此处只是占位：真正写盘前会在每次分离时重定向到临时工作目录
+        # （见 _redirect_output），故底层产物不会落到 self.output_dir / 当前目录。
         kwargs: dict = {
-            "output_dir": self.output_dir,
+            "output_dir": str(Path(self.cache_dir)),
             "output_format": "WAV",
             "output_single_stem": "Vocals",
         }
@@ -273,15 +279,15 @@ class VocalSeparator:
         seg_seconds = self.segment_minutes * 60
         duration = _probe_duration(str(in_path)) if seg_seconds > 0 else 0.0
 
-        # 临时分段与底层中间产物都落在 output_dir，先确保它存在（-o 指定的相对
-        # 文件名其父目录可能尚未建）。
-        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-        tmp_dir = Path(tempfile.mkdtemp(prefix="kits_sep_", dir=self.output_dir))
-        wav_parts: list[Path] = []
+        # 切片与底层裸 WAV 统一落在 cache_dir 下的临时工作目录，与最终输出位置解耦，
+        # 不再漏进当前目录 / output_dir。整个目录用完即删，无需逐个清中间 WAV。
+        cache_root = Path(self.cache_dir)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = Path(tempfile.mkdtemp(prefix="kits_sep_", dir=cache_root))
         try:
             if seg_seconds <= 0 or duration <= seg_seconds:
                 # 短音频或禁用分段：整段分离出一份 WAV
-                wav_parts.append(Path(self._separate_one(in_path)))
+                wav_parts = [Path(self._separate_one(in_path, tmp_dir))]
             else:
                 wav_parts = self._separate_segments(in_path, duration, seg_seconds, tmp_dir)
 
@@ -291,8 +297,6 @@ class VocalSeparator:
             return str(final_path)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            for p in wav_parts:  # 清理落在 output_dir 的中间人声 WAV
-                p.unlink(missing_ok=True)
 
     def _separate_segments(
         self, in_path: Path, duration: float, seg_seconds: float, tmp_dir: Path
@@ -312,19 +316,27 @@ class VocalSeparator:
 
             seg_in = tmp_dir / f"seg_{idx:03d}.wav"
             _slice_audio(str(in_path), start, dur, seg_in)
-            vocal = self._separate_one(seg_in)
+            vocal = self._separate_one(seg_in, tmp_dir)
             vocal_parts.append(Path(vocal))
             seg_in.unlink(missing_ok=True)  # 原始分段切片用完即删，省空间
         return vocal_parts
 
-    def _separate_one(self, in_path: Path) -> str:
+    def _separate_one(self, in_path: Path, work_dir: Path) -> str:
         """对单个（已确保不超长的）音频文件做一次分离，返回人声 WAV 路径。
 
-        audio-separator 的输出目录在 load() 时已固化为 self.output_dir，运行时改
-        属性无效，故产物统一落在 self.output_dir，返回值据此拼绝对路径。
+        分离前把底层 Separator（及其 model_instance）的 output_dir 重定向到 work_dir，
+        故裸 WAV 落在临时工作目录、不污染当前目录或 self.output_dir。
         """
         if self._sep is None:
             self.load()
+
+        work_dir.mkdir(parents=True, exist_ok=True)
+        # audio-separator 在 separate() 时才读 output_dir（见 common_separator 写盘逻辑），
+        # 故运行时重定向有效；model_instance 已加载时需一并同步。
+        work_str = str(work_dir)
+        self._sep.output_dir = work_str
+        if getattr(self._sep, "model_instance", None) is not None:
+            self._sep.model_instance.output_dir = work_str
 
         print(f"🎤 正在分离人声: {in_path.name}")
         outputs = self._sep.separate(str(in_path))
@@ -334,7 +346,7 @@ class VocalSeparator:
         # 只取人声轨（output_single_stem='Vocals' 时通常只有一个输出）
         vocal = next((p for p in outputs if "vocal" in str(p).lower()), outputs[0])
         vocal_path = Path(vocal)
-        # audio-separator 通常只返回裸文件名，落在 output_dir 下
+        # audio-separator 通常只返回裸文件名，落在重定向后的 work_dir 下
         if not vocal_path.is_absolute() and not vocal_path.exists():
-            vocal_path = Path(self.output_dir) / vocal_path.name
+            vocal_path = work_dir / vocal_path.name
         return str(vocal_path)
