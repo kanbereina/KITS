@@ -1,4 +1,4 @@
-"""命令行入口：子命令 download / subtitle / translate / separate / sum。
+"""命令行入口：子命令 download / subtitle / translate / separate / summarize（各带简写别名）。
 
 download:  下载 Twitch 直播 -> 合并 MP4 -> 可选 MP3 / SRT
 subtitle:  已有音频 -> SRT 字幕（可选 --separate 先分离人声）
@@ -114,7 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # --- download 子命令 ---
-    dl = sub.add_parser("download", help="下载 Twitch 直播并合并为 MP4")
+    dl = sub.add_parser("download", aliases=["dl"], help="下载 Twitch 直播并合并为 MP4")
     dl.add_argument("url", help="TS 文件示例 URL，形如 https://.../chunked/1710.ts")
     dl.add_argument("-o", "--output", default="output", help="输出文件名(不含扩展名)")
     dl.add_argument("--dir", default="downloads", help="下载目录")
@@ -125,23 +125,26 @@ def build_parser() -> argparse.ArgumentParser:
     dl.add_argument("--mp3", action="store_true", help="额外导出 MP3 音频")
     dl.add_argument("--srt", action="store_true", help="额外生成 SRT 字幕(自动转录音频)")
     _add_subtitle_args(dl)
+    dl.set_defaults(func=_run_download)
 
     # --- subtitle 子命令 ---
-    st = sub.add_parser("subtitle", help="把已有音频转成 SRT 字幕")
+    st = sub.add_parser("subtitle", aliases=["srt"], help="把已有音频转成 SRT 字幕")
     st.add_argument("-i", "--input", required=True, help="输入音频文件(必填)")
     st.add_argument("-o", "--output", default="subtitle.srt", help="输出 SRT 文件")
     _add_subtitle_args(st)
+    st.set_defaults(func=_run_subtitle)
 
     # --- translate 子命令 ---
-    tr = sub.add_parser("translate", help="把日语 SRT 翻译成中文 SRT(DeepSeek)")
+    tr = sub.add_parser("translate", aliases=["tr"], help="把日语 SRT 翻译成中文 SRT(DeepSeek)")
     tr.add_argument("-i", "--input", required=True, help="输入 SRT 字幕文件(必填)")
     tr.add_argument("-o", "--output", default=None, help="输出 SRT(默认在原名后加 .zh)")
     tr.add_argument("--api-key", default=None, help="DeepSeek API Key(默认读环境变量 DEEPSEEK_API_KEY)")
     tr.add_argument("--model", default="deepseek-chat", help="DeepSeek 模型名")
     tr.add_argument("--batch-size", type=int, default=20, help="每批翻译的字幕条数")
+    tr.set_defaults(func=_run_translate)
 
     # --- separate 子命令 ---
-    sp = sub.add_parser("separate", help="从音频分离出人声(audio-separator)")
+    sp = sub.add_parser("separate", aliases=["sep"], help="从音频分离出人声(audio-separator)")
     sp.add_argument("-i", "--input", required=True, help="输入音频文件(必填)")
     sp.add_argument(
         "-o", "--output", default=None,
@@ -175,9 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="输出比特率(如 128k)，默认自动对齐原音频(向上取整到 2 的幂)；无损格式忽略",
     )
+    sp.set_defaults(func=_run_separate)
 
-    # --- sum 子命令 ---
-    sm = sub.add_parser("sum", help="对已有 SRT 字幕用 AI 总结(DeepSeek)")
+    # --- summarize 子命令 ---
+    sm = sub.add_parser("summarize", aliases=["sum"], help="对已有 SRT 字幕用 AI 总结(DeepSeek)")
     sm.add_argument("-i", "--input", required=True, help="输入 SRT 字幕文件(必填)")
     sm.add_argument("-o", "--output", default=None, help="输出总结文件(默认在原名后加 .summary.md)")
     sm.add_argument("--api-key", default=None, help="DeepSeek API Key(默认读环境变量 DEEPSEEK_API_KEY)")
@@ -198,6 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=8000,
         help="单块送审的最大字符数，超长字幕按此分块总结",
     )
+    sm.set_defaults(func=_run_sum)
 
     return parser
 
@@ -473,16 +478,8 @@ def main(argv: list[str] | None = None) -> None:
             reconfigure(encoding="utf-8", errors="replace")
 
     args = build_parser().parse_args(argv)
-    if args.command == "download":
-        _run_download(args)
-    elif args.command == "subtitle":
-        _run_subtitle(args)
-    elif args.command == "translate":
-        _run_translate(args)
-    elif args.command == "separate":
-        _run_separate(args)
-    elif args.command == "sum":
-        _run_sum(args)
+    # 各子命令用 set_defaults(func=...) 绑定处理函数，别名与规范名都能正确分发
+    args.func(args)
 
 
 if __name__ == "__main__":
