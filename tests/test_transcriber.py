@@ -6,7 +6,13 @@
 
 from __future__ import annotations
 
-from kits.transcriber import _keep_core_words, _shift_words, _word_center, plan_segments
+from kits.transcriber import (
+    _keep_core_words,
+    _longest_silence_midpoint,
+    _shift_words,
+    _word_center,
+    plan_segments,
+)
 
 
 class TestPlanSegments:
@@ -72,6 +78,39 @@ class TestPlanSegments:
             700.0, strict, target_chunk=300.0, max_chunk=600.0, fallback_silences=fb
         )
         assert segments[0] == (0.0, 315.0)
+
+    def test_picks_longest_silence_not_first(self):
+        # 窗口(300,600)内有 3 段静音：310(停4s) / 450(停20s) / 520(停2s)
+        # 应切最长的 450 处，而非最早的 310
+        silences = [(308.0, 312.0), (440.0, 460.0), (519.0, 521.0)]
+        segments = plan_segments(900.0, silences, target_chunk=300.0, max_chunk=600.0)
+        assert segments[0] == (0.0, 450.0)
+
+    def test_longest_silence_tie_prefers_earlier(self):
+        # 并列最长时取更靠前者：两段都停 10s，取 350 而非 500
+        silences = [(345.0, 355.0), (495.0, 505.0)]
+        segments = plan_segments(900.0, silences, target_chunk=300.0, max_chunk=600.0)
+        assert segments[0] == (0.0, 350.0)
+
+
+class TestLongestSilenceMidpoint:
+    def test_returns_longest_in_window(self):
+        sil = [(310.0, 314.0), (400.0, 420.0), (500.0, 505.0)]
+        assert _longest_silence_midpoint(sil, 300.0, 600.0) == 410.0
+
+    def test_excludes_out_of_window(self):
+        # 窗口外的更长静音不算；窗口内只有 350 合格
+        sil = [(100.0, 200.0), (348.0, 352.0)]
+        assert _longest_silence_midpoint(sil, 300.0, 600.0) == 350.0
+
+    def test_none_when_empty_window(self):
+        sil = [(100.0, 150.0), (700.0, 760.0)]
+        assert _longest_silence_midpoint(sil, 300.0, 600.0) is None
+
+    def test_boundary_is_exclusive(self):
+        # 中点正好落在 lo 或 hi 上不算（区间开）
+        sil = [(295.0, 305.0)]  # 中点 300 == lo
+        assert _longest_silence_midpoint(sil, 300.0, 600.0) is None
 
 
 class TestShiftWords:

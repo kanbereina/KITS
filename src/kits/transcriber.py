@@ -92,6 +92,28 @@ def detect_silences(
     return silences
 
 
+def _longest_silence_midpoint(
+    silences: list[tuple[float, float]], lo: float, hi: float
+) -> float | None:
+    """在 (lo, hi) 窗口内挑「时长最长」的静音，返回其中点；无则 None。
+
+    选最长静音而非第一个：最长的停顿最可能是真正的语句/段落间隙，切在那里
+    最不容易把一句话拦腰截断。中点须严格落在 (lo, hi) 内才作数。
+    并列时取更靠前者（先到先得，使分段更接近 target_chunk、不无谓拖长）。
+    """
+    best_mid: float | None = None
+    best_len = -1.0
+    for s, e in silences:
+        mid = (s + e) / 2
+        if not (lo < mid < hi):
+            continue
+        length = e - s
+        if length > best_len:
+            best_len = length
+            best_mid = mid
+    return best_mid
+
+
 def plan_segments(
     duration: float,
     silences: list[tuple[float, float]],
@@ -101,43 +123,30 @@ def plan_segments(
 ) -> list[tuple[float, float]]:
     """根据静音区间规划分段切点，返回 [(start, end), ...] 覆盖 [0, duration]。
 
-    策略：从当前段起点出发，在 [起点+target_chunk 之后的第一个静音中点] 处切；
-    若到 起点+max_chunk 仍无（严格阈值的）静音可切（如长时间唱歌），先在
-    fallback_silences（更宽松阈值探到的静音）里找一个落在 (soft_limit, hard_limit)
-    的中点退而求其次；仍无才在 max_chunk 处强切兜底。切点优先落在静音中点，不打断语句。
+    策略：从当前段起点出发，在窗口 (起点+target_chunk, 起点+max_chunk) 内选「时长最长」
+    的静音中点处切（最长停顿最可能是真正语句间隙，切在那里最不易截断语句）；
+    若严格阈值在该窗口内无静音（如长时间唱歌），改用 fallback_silences（更宽松阈值探到的
+    静音）里的最长静音退而求其次；仍无才在 max_chunk 处强切兜底。
 
-    fallback_silences 为 None 时退化为原行为（无二次探测），保证既有契约不变。
+    fallback_silences 为 None 时只是不启用二次探测，主切点仍走「窗口内最长静音」。
     """
     if duration <= max_chunk:
         return [(0.0, duration)]
 
-    # 静音中点列表（升序），作为候选切点
-    midpoints = sorted((s + e) / 2 for s, e in silences)
-    # 宽松阈值探到的备选中点（升序），仅在严格候选缺位时启用
-    fb_midpoints = sorted((s + e) / 2 for s, e in (fallback_silences or []))
-
+    fb = fallback_silences or []
     segments: list[tuple[float, float]] = []
     start = 0.0
-    idx = 0
     while start < duration:
         soft_limit = start + target_chunk
         hard_limit = start + max_chunk
-        # 跳过落在软下限之前的候选切点
-        while idx < len(midpoints) and midpoints[idx] <= soft_limit:
-            idx += 1
-        cut = None
-        if idx < len(midpoints) and midpoints[idx] < hard_limit:
-            cut = midpoints[idx]
-            idx += 1
-        else:
-            # 严格阈值无候选：在宽松候选里找落在 (soft_limit, hard_limit) 的第一个
-            cut = next(
-                (m for m in fb_midpoints if soft_limit < m < hard_limit),
-                None,
-            )
-            if cut is None:
-                # 宽松候选也没有：强切在硬上限兜底
-                cut = hard_limit
+        # 优先：严格阈值静音里窗口内最长的
+        cut = _longest_silence_midpoint(silences, soft_limit, hard_limit)
+        if cut is None:
+            # 退而求其次：宽松阈值静音里窗口内最长的
+            cut = _longest_silence_midpoint(fb, soft_limit, hard_limit)
+        if cut is None:
+            # 都没有：强切在硬上限兜底
+            cut = hard_limit
         end = min(cut, duration)
         segments.append((start, end))
         start = end

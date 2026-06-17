@@ -204,8 +204,11 @@ class SrtWriter:
     def __init__(self, output_file: str):
         self.output_file = output_file
         self._index = 0
-        # 开始时清空/创建文件
+        # 开始时清空/创建文件。显式 truncate：若上次运行被强杀留下残留文件，
+        # "w" 在个别平台/文件系统上不保证把旧内容截断到新长度，可能残留上次更长的尾部
+        # （表现为文件中段出现 NUL 空洞 + 旧字幕尾巴）。truncate(0) 强制清零长度兜底。
         self._fh = open(output_file, "w", encoding="utf-8")
+        self._fh.truncate(0)
 
     def append(self, sentences: list[Sentence]) -> int:
         """追加一批句子，返回累计已写入条数。"""
