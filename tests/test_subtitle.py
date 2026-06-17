@@ -5,6 +5,7 @@ from __future__ import annotations
 from kits.subtitle import (
     SrtWriter,
     Word,
+    _split_internal_punctuation,
     clean_text,
     parse_srt,
     seconds_to_srt_time,
@@ -76,6 +77,44 @@ class TestCleanText:
         assert clean_text("") == ""
 
 
+class TestSplitInternalPunctuation:
+    def test_splits_chunk_with_internal_ending(self):
+        # 一个 chunk 内含句中句号，应拆成两个 Word，时间按字符比例分配
+        words = [_word("そうだ。どう", 0.0, 10.0)]
+        out = _split_internal_punctuation(words)
+        assert [w["text"] for w in out] == ["そうだ。", "どう"]
+        # "そうだ。" 占 4/6 字符 → end ≈ 0 + 10*4/6
+        assert abs(out[0]["timestamp"][1] - 10.0 * 4 / 6) < 1e-6
+        assert out[1]["timestamp"][0] == out[0]["timestamp"][1]
+        assert out[1]["timestamp"][1] == 10.0
+
+    def test_multiple_internal_endings(self):
+        words = [_word("あ?い。う", 0.0, 9.0)]
+        out = _split_internal_punctuation(words)
+        assert [w["text"] for w in out] == ["あ?", "い。", "う"]
+
+    def test_no_split_when_punct_at_end(self):
+        # 标点恰在末尾不算内部切点，原样返回（交给 segment_sentences 正常处理）
+        words = [_word("こんにちは。", 0.0, 2.0)]
+        out = _split_internal_punctuation(words)
+        assert out == words
+
+    def test_no_split_without_punctuation(self):
+        words = [_word("ただのテキスト", 0.0, 2.0)]
+        out = _split_internal_punctuation(words)
+        assert out == words
+
+    def test_no_split_when_timestamps_missing(self):
+        # 时间戳缺失无法按比例分配，原样透传不拆
+        words = [_word("そう。どう", None, None)]
+        out = _split_internal_punctuation(words)
+        assert out == words
+
+    def test_preserves_normal_words(self):
+        words = [_word("ふつう", 0.0, 1.0), _word("の", 1.0, 2.0)]
+        assert _split_internal_punctuation(words) == words
+
+
 class TestSegmentSentences:
     def test_empty_input(self):
         assert segment_sentences([]) == []
@@ -102,6 +141,16 @@ class TestSegmentSentences:
         assert len(result) == 2
         assert result[0]["text"] == "はい。"
         assert result[1]["text"] == "いいえ。"
+
+    def test_splits_on_internal_sentence_ending(self):
+        # 单个 chunk 内含多句（句末标点在中间）→ 应在标点处断成多条，而非靠 max_duration 硬钳
+        words = [_word("そうだ。どうだろう？こんにちは", 0.0, 12.0)]
+        result = segment_sentences(words, max_duration=15.0)
+        assert [s["text"] for s in result] == ["そうだ。", "どうだろう？", "こんにちは"]
+        # 时间轴单调不重叠
+        assert result[0]["start"] == 0.0
+        assert result[0]["end"] <= result[1]["start"]
+        assert result[1]["end"] <= result[2]["start"]
 
     def test_splits_on_long_gap(self):
         # 两个词之间停顿超过 max_gap=0.7，应断句
