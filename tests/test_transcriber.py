@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from kits.transcriber import _shift_words, plan_segments
+from kits.transcriber import _keep_core_words, _shift_words, _word_center, plan_segments
 
 
 class TestPlanSegments:
@@ -43,6 +43,36 @@ class TestPlanSegments:
         # 应在 405 处切，而非 102.5
         assert segments[0] == (0.0, 405.0)
 
+    def test_fallback_none_preserves_original_behavior(self):
+        # fallback_silences 默认 None：无静音时仍在硬上限强切（原契约不变）
+        segments = plan_segments(1000.0, [], target_chunk=300.0, max_chunk=600.0)
+        assert segments[0] == (0.0, 600.0)
+
+    def test_fallback_used_before_hard_cut(self):
+        # 严格阈值无静音、但宽松候选在 (300,600) 有中点 (440+460)/2=450 → 用它而非硬切 600
+        fb = [(440.0, 460.0)]
+        segments = plan_segments(
+            1000.0, [], target_chunk=300.0, max_chunk=600.0, fallback_silences=fb
+        )
+        assert segments[0] == (0.0, 450.0)
+
+    def test_fallback_outside_window_falls_back_to_hard_cut(self):
+        # 宽松候选都不在 (300,600) 区间内 → 仍硬切在 600
+        fb = [(100.0, 110.0), (700.0, 710.0)]
+        segments = plan_segments(
+            1000.0, [], target_chunk=300.0, max_chunk=600.0, fallback_silences=fb
+        )
+        assert segments[0] == (0.0, 600.0)
+
+    def test_strict_silence_preferred_over_fallback(self):
+        # 严格阈值已有候选(315)时，不动用宽松候选
+        strict = [(310.0, 320.0)]
+        fb = [(340.0, 360.0)]
+        segments = plan_segments(
+            700.0, strict, target_chunk=300.0, max_chunk=600.0, fallback_silences=fb
+        )
+        assert segments[0] == (0.0, 315.0)
+
 
 class TestShiftWords:
     def test_adds_offset_to_timestamps(self):
@@ -62,3 +92,52 @@ class TestShiftWords:
 
     def test_empty_list(self):
         assert _shift_words([], 10.0) == []
+
+
+class TestWordCenter:
+    def test_both_ends_uses_midpoint(self):
+        assert _word_center({"text": "あ", "timestamp": (10.0, 20.0)}) == 15.0
+
+    def test_only_end_uses_end(self):
+        # kotoba chunk 常见尾部 end=None 之外，也有只有 end 的情形
+        assert _word_center({"text": "い", "timestamp": (None, 20.0)}) == 20.0
+
+    def test_only_start_uses_start(self):
+        assert _word_center({"text": "う", "timestamp": (10.0, None)}) == 10.0
+
+    def test_both_none_returns_none(self):
+        assert _word_center({"text": "え", "timestamp": (None, None)}) is None
+
+
+class TestKeepCoreWords:
+    def _w(self, text: str, start: float, end: float):
+        return {"text": text, "timestamp": (start, end)}
+
+    def test_drops_words_in_left_padding(self):
+        # 逻辑区间 [100, 200)，垫料区 [98,100) 的词中心=99 应被丢弃
+        words = [self._w("pad", 98.0, 100.0), self._w("core", 150.0, 160.0)]
+        kept = _keep_core_words(words, 100.0, 200.0)
+        assert [w["text"] for w in kept] == ["core"]
+
+    def test_drops_words_in_right_padding(self):
+        # 右垫料区中心 >= hi 被丢弃；正好落在 hi 上的也丢（区间右开）
+        words = [self._w("core", 150.0, 160.0), self._w("pad", 200.0, 210.0)]
+        kept = _keep_core_words(words, 100.0, 200.0)
+        assert [w["text"] for w in kept] == ["core"]
+
+    def test_none_bounds_keep_everything_in_range(self):
+        # 首段左侧 lo=None：不丢左边的词；末段右侧 hi=None：不丢右边的词
+        words = [self._w("a", 0.0, 5.0), self._w("b", 500.0, 510.0)]
+        assert _keep_core_words(words, None, None) == words
+
+    def test_keeps_word_with_unknown_center(self):
+        # 时间戳全缺无法定位中心，保守保留避免丢内容
+        words = [{"text": "x", "timestamp": (None, None)}]
+        assert _keep_core_words(words, 100.0, 200.0) == words
+
+    def test_seam_no_gap_no_overlap(self):
+        # 相邻两段接缝去重：中心正好落在边界 150 的词只归右段一次（区间左闭右开）
+        prev = _keep_core_words([self._w("seam", 148.0, 152.0)], 100.0, 150.0)
+        nxt = _keep_core_words([self._w("seam", 148.0, 152.0)], 150.0, 200.0)
+        assert [w["text"] for w in prev] == []   # 中心 150 >= hi(150)，左段丢
+        assert [w["text"] for w in nxt] == ["seam"]  # 中心 150 >= lo(150)，右段留
