@@ -97,6 +97,50 @@ def _last_soft_break(words: list[Word]) -> int | None:
     return None
 
 
+# 句末标点集合（用于在 chunk 文本内部查找切点）。注意排除 SENTENCE_ENDINGS 里的引号类
+# （」』】〉》）——它们只在「整段以其结尾」时才算句末，出现在文本中间不宜就地切。
+_INNER_ENDINGS = ("。", "．", ".", "！", "!", "？", "?", "…")
+
+
+def _split_internal_punctuation(words: list[Word]) -> list[Word]:
+    """把「文本内部含句末标点」的 chunk 拆成多个 Word，时间戳按字符长度比例分配。
+
+    kotoba 等蒸馏模型的标点恢复是逐 chunk 补的，一个 chunk 内可能含多句（如
+    「そう?どうだろう。こんにちは」），其句末标点在文本中间，segment_sentences 的
+    「chunk 结尾判标点」断不开，只能等 max_duration 硬钳。这里预处理：在每个句末标点
+    之后切开成独立 Word，使后续断句能在标点处自然分段。时间戳缺失则原样透传不拆。
+    """
+    result: list[Word] = []
+    for w in words:
+        text = w["text"]
+        ts = w.get("timestamp") or (None, None)
+        start, end = ts
+        # 找出所有「句末标点」在文本中的结束位置（标点之后即为切点）
+        cuts = [
+            i + 1
+            for i, ch in enumerate(text)
+            if ch in _INNER_ENDINGS
+        ]
+        # 无内部标点、或标点恰在末尾（只有一个切点且等于文本长度）、或时间戳缺失 → 不拆
+        meaningful = [c for c in cuts if 0 < c < len(text)]
+        if not meaningful or start is None or end is None or end <= start:
+            result.append(w)
+            continue
+        # 按字符比例把 [start, end] 切成若干片段
+        total = len(text)
+        span = end - start
+        prev = 0
+        bounds = [*meaningful, total] if meaningful[-1] != total else meaningful
+        for b in bounds:
+            piece = text[prev:b]
+            if piece:
+                seg_start = start + span * (prev / total)
+                seg_end = start + span * (b / total)
+                result.append({"text": piece, "timestamp": (seg_start, seg_end)})
+            prev = b
+    return result
+
+
 def segment_sentences(
     words: list[Word],
     max_gap: float = 0.7,
@@ -106,10 +150,12 @@ def segment_sentences(
     """把单词级时间戳切分成完整句子。
 
     断句条件（按优先级）：
-      1. 以句子结尾标点结束
+      1. 以句子结尾标点结束（含 chunk 内部的句末标点——先经 _split_internal_punctuation
+         把含内部标点的 chunk 拆开，使句中的 。？！ 也能触发断句）
       2. 与上一个单词的停顿(无声)超过 max_gap
       3. 超过字符上限 max_chars / 时长上限 max_duration（防止句子失控变长）
     """
+    words = _split_internal_punctuation(words)
     sentences: list[Sentence] = []
     buf: list[Word] = []
     # 缓冲区内最后一个已知的 end（应对词级时间戳缺失：Whisper 常吐 None）
@@ -204,8 +250,11 @@ class SrtWriter:
     def __init__(self, output_file: str):
         self.output_file = output_file
         self._index = 0
-        # 开始时清空/创建文件
+        # 开始时清空/创建文件。显式 truncate：若上次运行被强杀留下残留文件，
+        # "w" 在个别平台/文件系统上不保证把旧内容截断到新长度，可能残留上次更长的尾部
+        # （表现为文件中段出现 NUL 空洞 + 旧字幕尾巴）。truncate(0) 强制清零长度兜底。
         self._fh = open(output_file, "w", encoding="utf-8")
+        self._fh.truncate(0)
 
     def append(self, sentences: list[Sentence]) -> int:
         """追加一批句子，返回累计已写入条数。"""

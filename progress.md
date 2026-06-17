@@ -34,6 +34,79 @@
 - `--separate` 集成转录、`sum` 端到端（需 GPU / DeepSeek Key）
 - separator.py 用延迟导入 + 已按官方 API 写，单测验证了构造不触发重依赖导入
 
+## 阶段 7：外层静音/重叠分段修复（2026-06-17）
+根因：用户反馈「v2.2 适配不够，尤其静音/重叠」。核查后定性——不在模型版本（v2.2 自带 pipeline 强制
+pyannote diarization + 整段处理 + 标点/时间戳分叉，反而不适合本项目，现状方向正确），而在外层 plan_segments：
+硬切无重叠 → 唱歌长无静音段被 600s 硬切拦腰截断，接缝吞字/重复；内层 stride 只管单段内部、救不了接缝。
+
+改动：
+- transcriber.py 新增纯逻辑 `_word_center` / `_keep_core_words`（中心时间归属判定 + overlap 去重）
+- transcribe_segmented 加 `overlap` 形参（默认 2s）：每段取数窗口两侧 pad → 转录 → _shift_words(按窗口起点)
+  → _keep_core_words 按词中心裁回逻辑区间（首段左/末段右不设限）。plan_segments **不动**，5 个契约测试全保住
+- slice_audio 改 `-ss {start} -i ... -t {时长}`（弃 `-to` 绝对结束，跨 ffmpeg 版本语义稳定）
+- cli 加 `--segment-overlap`（默认 2.0，0 关闭），透传到 transcribe_segmented
+- 迁移残留清理：模块 docstring + pyproject 描述 → kotoba-whisper-v2.2
+- 真实运行（250min 直播，RTX 5060）暴露并修正一处判断：日志显示模型在做 language detection。查 generation_config.json
+  确认 `is_multilingual=true` 且 forced_decoder_ids 语言槽=null（不固定语言）→ 不传 language 则每段自动检测语种，
+  对唱歌/BGM/日英混杂段易误判、那段质量骤降。**修正上一轮的错误注释**（曾误判为「单语模型、language 无操作」），
+  按官方 kotoba_whisper.py 放开 `language="ja"`+`task="transcribe"`，消除误判与两条相关弃用告警
+- pipeline 构造 `torch_dtype` → `dtype`（transformers 5.x 弃用旧名），消除告警
+- 新增 9 个纯逻辑单测（TestWordCenter ×4 + TestKeepCoreWords ×5）
+- silence_db 二次宽松探测（用户选定方案）：plan_segments 加可选 `fallback_silences`（默认 None=原行为）；
+  transcribe_segmented 加 `fallback_db`（默认 -35，> noise_db 才二次探测），硬切前先用宽松候选找次优切点；
+  CLI `--fallback-db`。再 +4 单测（None保原行为/宽松优先于硬切/区间外回退硬切/严格优先于宽松）
+
+| 测试 | 输入 | 预期结果 | 实际结果 | 状态 |
+|------|------|---------|---------|------|
+| test_transcriber.py | 含新 13 测 | 全过 | 22 passed（原 9 + 新 13） | ✅ |
+| 全量 pytest | 含本阶段 | 全过 | 133 passed（原 120 + 13） | ✅ |
+| ruff check . | 全仓 | 无告警 | All checks passed | ✅ |
+| CLI 两新参数 | subtitle -h | 均出现 | --segment-overlap / --fallback-db 已注册 | ✅ |
+| plan_segments 5 契约 | 原测试 | 不破坏 | 全过（fallback 默认 None 行为不变） | ✅ |
+
+## 真实运行已确认（250min 直播，RTX 5060，2026-06-17）
+- 模型名已在开头打印（🤖 使用模型: ...）；CUDA/加载正常
+- overlap 去重生效：第 2 段日志「取数 299.6~608.2s」左边界 = 301.6 - 2.0，垫料按预期外扩
+- 二次宽松探测生效：严格 -45dB 找到 2967 段、宽松 -35dB 找到 2959 段，规划为 50 段
+- generation_config.json 实锤 is_multilingual=true / 语言槽 null → 已放开 language=ja 修正
+- **静音切分实测健康**：50 段 ÷ 15050s ≈ 301s/段 → 几乎全在静音切、基本无硬切；末条 15047.9s≈全长 → 覆盖完整
+- **SRT 实测发现 NUL bug**：文件中段 [19398..32432) 整块 13034 个 NUL，后接旧序号 358/45min 内容
+  → 上次运行被强杀留残留、本次 "w" 覆盖未截断尾部。SrtWriter.__init__ 加 truncate(0) 兜底（45 测过）
+- **19% 字幕被 15s 钳满**：根因非静音切分，是长段内部 chunk 没补句末标点 → segment_sentences 无切点。待后续优化
+- 用户选定「切点选窗口内最长静音」：plan_segments 改用 _longest_silence_midpoint（最长停顿=最可能语句间隙），
+  并列取靠前者；严格→宽松→硬切三级兜底不变。+6 单测（最长非最早/并列靠前/窗口内最长/窗口外排除/空窗None/边界开区间）
+
+| 测试 | 输入 | 预期结果 | 实际结果 | 状态 |
+|------|------|---------|---------|------|
+| 全量 pytest（最终） | 含本阶段全部 | 全过 | 139 passed（原 120 + 19 新） | ✅ |
+| ruff check .（最终） | 全仓 | 无告警 | All checks passed | ✅ |
+| plan_segments 5 原契约 | 原测试 | 改最长静音后不破坏 | 全过（各窗口仅 1 个合格静音） | ✅ |
+
+## 真实运行 #2 已确认（250min 直播，RTX 5060，2026-06-17，重跑）
+- **NUL bug 已修**：重跑后 SRT 含 0 个 NUL 字节（truncate 生效）
+- **overlap 去重无瑕**：1572 条字幕时间倒退 0 条、末条 15049.8s≈全长 → 接缝无重叠无丢失
+- **最长静音切点生效**：段数 50→33，段长 243~599s 浮动（原固定 ~301s）= 等到窗口内最长停顿才切
+- **18.2% 字幕仍被 15s 钳满（286 条）**：确认根因 = chunk 内部句末标点（。？！）断不开
+- 用户选定「按句末标点切开」：新增 _split_internal_punctuation 预处理——把含内部句末标点的 chunk
+  拆成多 Word、时间戳按字符比例分配，使 segment_sentences 能在句中标点断句。时间戳缺失则原样透传。
+  +7 单测（拆分/多标点/标点在末尾不拆/无标点/缺时间戳/保留普通词/端到端句中断句）
+- **模拟修复效果（拿真实 SRT 跑 _split_internal_punctuation）**：1572→3706 片段；
+  拆分后仍 ≥14.9s 的片段仅 5 个、且其内部已无句末标点 → 18.2% 被钳实质降到 ~0.3% 且剩余合理
+
+| 测试 | 输入 | 预期结果 | 实际结果 | 状态 |
+|------|------|---------|---------|------|
+| 全量 pytest（最终） | 含本阶段全部 | 全过 | 146 passed（原 120 + 26 新） | ✅ |
+| ruff check .（最终） | 全仓 | 无告警 | All checks passed | ✅ |
+| 原 45 subtitle 契约 | 原测试 | 加句中断句后不破坏 | 全过（原测试句末标点均为独立 Word，不触发内部拆分） | ✅ |
+
+## 未在本会话验证（需 GPU + 真实长音频）
+- 放开 language=ja 后唱歌/BGM 段的语种误判是否消除、质量是否提升（改动后未重跑）
+- overlap 去重在真实唱歌段的去吞字/去重复效果（仅纯逻辑单测覆盖归属判定）
+- 切点选最长静音后真实分段质量（仅单测验证选择逻辑）
+- NUL bug 修复：需用户删旧 output.srt 重跑确认干净输出
+- 19% 被钳问题未动（句中标点断句优化，待用户决定是否做）
+- slice_audio 新 ffmpeg 参数在本机 ffmpeg 的实际切段精度
+
 ## 阶段 6：kotoba 适配 + 标点恢复（2026-06-15 续）
 - 根因：kotoba-whisper-v2.2 decoder_layers=2，但 alignment_heads 继承 large-v3（引用第 25 层）→ word 级时间戳 IndexError
 - 改 transcriber `_transcribe_file` → `return_timestamps=True`（chunk 级），崩溃消除

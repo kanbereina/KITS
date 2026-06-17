@@ -1,7 +1,7 @@
 [project]
 name = "KITS"
-version = "1.1.1"
-description = "基于 openai/whisper-large-v3-turbo 的鹿乃 Twitch 直播总结工具，支持 50 系 Nvidia 显卡"
+version = "1.2.0"
+description = "基于 kotoba-whisper-v2.2 的鹿乃 Twitch 直播总结工具，支持 50 系 Nvidia 显卡"
 readme = "README.md"
 authors = [
     { name = "KanbeReina", email = "kano.2525@qq.com" }

@@ -69,7 +69,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - `download --srt` 隐含 `--mp3`（生成字幕必须先有音频），逻辑在 `_run_download` 的 `need_mp3 = args.mp3 or args.srt`。
 - 断句与分段参数（`--max-gap` / `--target-chunk` 等）由 `_add_subtitle_args` 在 download / subtitle 间共用。
 - TS URL 里的分片编号**仅用于定位 base_url**，下载范围默认从 0 开始、用指数探测+二分定位结尾（`detect_end_number`）。
-- 长音频分段：`transcribe_segmented` 用 ffmpeg `silencedetect` 探测静音，`plan_segments` 贪心在静音中点切（段内无静音则在 `max_chunk` 硬上限强切兜底），切点落在无人说话处故不打断语句、精度不变。短音频（≤ `max_chunk`）退化为整段转录。分段时词级时间戳要 `_shift_words` 加回段起始偏移对齐全局时间轴。
+- 长音频分段：`transcribe_segmented` 用 ffmpeg `silencedetect` 探测静音，`plan_segments` 在窗口 `(target_chunk, max_chunk)` 内选**时长最长**的静音中点切（最长停顿最可能是真正语句间隙、最不易截断语句；并列取更靠前者）。段内严格阈值（`--silence-db`）该窗口探不到静音时，先用更宽松的二次阈值（`--fallback-db`，默认 -35dB，须比 `--silence-db` 宽松才启用）的最长静音找次优切点，仍无才在 `max_chunk` 硬上限强切兜底。切点落在无人说话处故不打断语句、精度不变。短音频（≤ `max_chunk`）退化为整段转录。每段取数窗口在逻辑区间两侧外扩 `--segment-overlap`（默认 2s）垫料给模型留接缝上下文（避免硬切吞字/切碎乐句），转录后 `_shift_words` 按窗口起点加回偏移对齐全局时间轴，再用 `_keep_core_words` 按「词中心落在本段逻辑区间 [start,end)」裁掉垫料区的词（首段左/末段右不设限）→ 接缝无缝去重。`plan_segments` 仍返回无缝相接的逻辑区间，垫料只作用于取数窗口。
 - `translator` / `summarizer` 按批 / 分块发送，DeepSeek 调用经公共客户端。翻译用「序号|||文本」格式逐条对应、按序号回填防错位；总结用 map-reduce（逐块总结后 reduce 合并），提示词来自 `prompts.json` 预设。翻译只改文本、时间戳原样保留。
 
 ## 扩展点
