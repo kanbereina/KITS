@@ -34,7 +34,22 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target-chunk", type=float, default=300.0, help="分段目标时长(秒)")
     parser.add_argument("--max-chunk", type=float, default=600.0, help="单段硬上限时长(秒)")
     parser.add_argument("--silence-db", type=float, default=-45.0, help="静音判定响度阈值(dB)，越负越严格")
+    parser.add_argument(
+        "--fallback-db",
+        type=float,
+        default=-35.0,
+        help="二次宽松静音阈值(dB)，应比 --silence-db 更宽松(更接近0)；"
+        "严格阈值在某段探不到静音、本会硬切时改用它找次优切点，把硬切降为最后兜底。"
+        "<= --silence-db 则关闭二次探测",
+    )
     parser.add_argument("--min-silence", type=float, default=0.5, help="最短静音时长(秒)")
+    parser.add_argument(
+        "--segment-overlap",
+        type=float,
+        default=2.0,
+        help="分段取数窗口两侧的重叠垫料(秒)，给模型在接缝处留上下文、避免硬切吞字；"
+        "转录后按词中心裁回，接缝无缝去重。0 关闭重叠",
+    )
     parser.add_argument(
         "--filter-game",
         action="append",
@@ -261,6 +276,8 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
             max_chunk=args.max_chunk,
             noise_db=args.silence_db,
             min_silence=args.min_silence,
+            overlap=args.segment_overlap,
+            fallback_db=args.fallback_db,
         )
         for words in segments_words:
             # 转录后、断句前补标点（时间戳不变），让 segment_sentences 能在句末标点处断句

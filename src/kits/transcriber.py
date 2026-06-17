@@ -1,4 +1,4 @@
-"""音频转录：封装 Whisper large-v3-turbo 的加载与转录。
+"""音频转录：封装 Whisper pipeline 的加载与转录（默认 kotoba-whisper-v2.2）。
 
 产出单词级时间戳列表（list[Word]），交给 kits.subtitle 断句生成 SRT。
 模型转录文本同样可直接喂给后续的 DeepSeek 总结模块。
@@ -97,18 +97,24 @@ def plan_segments(
     silences: list[tuple[float, float]],
     target_chunk: float = 300.0,
     max_chunk: float = 600.0,
+    fallback_silences: list[tuple[float, float]] | None = None,
 ) -> list[tuple[float, float]]:
     """根据静音区间规划分段切点，返回 [(start, end), ...] 覆盖 [0, duration]。
 
     策略：从当前段起点出发，在 [起点+target_chunk 之后的第一个静音中点] 处切；
-    若到 起点+max_chunk 仍无静音可切（如长时间唱歌），则在 max_chunk 处强切兜底。
-    切点优先落在静音中点，保证不打断语句。
+    若到 起点+max_chunk 仍无（严格阈值的）静音可切（如长时间唱歌），先在
+    fallback_silences（更宽松阈值探到的静音）里找一个落在 (soft_limit, hard_limit)
+    的中点退而求其次；仍无才在 max_chunk 处强切兜底。切点优先落在静音中点，不打断语句。
+
+    fallback_silences 为 None 时退化为原行为（无二次探测），保证既有契约不变。
     """
     if duration <= max_chunk:
         return [(0.0, duration)]
 
     # 静音中点列表（升序），作为候选切点
     midpoints = sorted((s + e) / 2 for s, e in silences)
+    # 宽松阈值探到的备选中点（升序），仅在严格候选缺位时启用
+    fb_midpoints = sorted((s + e) / 2 for s, e in (fallback_silences or []))
 
     segments: list[tuple[float, float]] = []
     start = 0.0
@@ -124,8 +130,14 @@ def plan_segments(
             cut = midpoints[idx]
             idx += 1
         else:
-            # 软下限到硬上限之间没有静音可切：强切在硬上限
-            cut = hard_limit
+            # 严格阈值无候选：在宽松候选里找落在 (soft_limit, hard_limit) 的第一个
+            cut = next(
+                (m for m in fb_midpoints if soft_limit < m < hard_limit),
+                None,
+            )
+            if cut is None:
+                # 宽松候选也没有：强切在硬上限兜底
+                cut = hard_limit
         end = min(cut, duration)
         segments.append((start, end))
         start = end
@@ -133,10 +145,16 @@ def plan_segments(
 
 
 def slice_audio(audio_file: str, start: float, end: float, out_path: Path) -> None:
-    """用 ffmpeg 切出 [start, end] 区间到 out_path（重编码为 16k 单声道 wav）。"""
+    """用 ffmpeg 切出 [start, end] 区间到 out_path（重编码为 16k 单声道 wav）。
+
+    用 `-ss {start} -i ... -t {时长}`（seek 到起点后读固定时长）而非 `-to {绝对结束}`：
+    `-to` 作为输入选项时，不同 ffmpeg 版本对「绝对时间轴 vs 相对 seek 点」解释不一，
+    可能切错段长；`-t` 取时长则语义稳定，跨版本一致。
+    """
+    duration = max(0.0, end - start)
     cmd = [
-        "ffmpeg", "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
-        "-i", audio_file,
+        "ffmpeg", "-ss", f"{start:.3f}", "-i", audio_file,
+        "-t", f"{duration:.3f}",
         "-ac", "1", "-ar", "16000", "-vn",
         str(out_path), "-y",
     ]
@@ -154,6 +172,49 @@ def _shift_words(words: list[Word], offset: float) -> list[Word]:
         end = None if ts[1] is None else ts[1] + offset
         shifted.append({"text": w["text"], "timestamp": (start, end)})
     return shifted
+
+
+def _word_center(word: Word) -> float | None:
+    """估算一个词（chunk）的中心时间，用于判定它归属哪一段。
+
+    时间戳两端齐全取中点；只有一端则用已知端（kotoba chunk 常见尾部 end=None、
+    首部 start=None）；两端皆缺返回 None（交由调用方保守保留）。
+    """
+    ts = word.get("timestamp") or (None, None)
+    start, end = ts
+    if start is not None and end is not None:
+        return (start + end) / 2
+    if end is not None:
+        return end
+    if start is not None:
+        return start
+    return None
+
+
+def _keep_core_words(
+    words: list[Word], lo: float | None, hi: float | None
+) -> list[Word]:
+    """只保留中心时间落在 [lo, hi) 的词，丢弃 overlap 垫料区里本属于相邻段的词。
+
+    分段转录时给每段取数窗口在逻辑区间两侧各 pad 若干秒（给模型留上下文，避免接缝
+    处把词/乐句切碎），转录后用本函数按「词中心落在本段逻辑区间」去重：垫料区的词
+    会落在相邻段的逻辑区间里、由相邻段保留，从而每个时间点恰好归属一段、接缝无缝。
+
+    lo / hi 为 None 表示该侧不设限（首段左侧、末段右侧），避免丢掉音频极端处的词。
+    无法定位中心（时间戳全缺）的词保守保留，避免丢内容。
+    """
+    kept: list[Word] = []
+    for w in words:
+        center = _word_center(w)
+        if center is None:
+            kept.append(w)
+            continue
+        if lo is not None and center < lo:
+            continue
+        if hi is not None and center >= hi:
+            continue
+        kept.append(w)
+    return kept
 
 
 class Transcriber:
@@ -208,6 +269,10 @@ class Transcriber:
             audio_file,
             return_timestamps=True,
             generate_kwargs={
+                # 不强制 language/task：kotoba-whisper 是日语单语蒸馏模型，原生按日语解码，
+                # 其 generation_config 已固定语言；显式传 language 在部分蒸馏权重上会触发
+                # 强制 decoder 前缀告警/异常。故 language 形参对本模型实为无操作（保留以兼容
+                # CLI 契约与未来换多语模型）。换回多语模型（如 large-v3）时再放开下面两行。
                 # "language": language,
                 # "task": "transcribe",
                 "num_beams": beams,
@@ -245,11 +310,21 @@ class Transcriber:
         max_chunk: float = 600.0,
         noise_db: float = -45.0,
         min_silence: float = 0.5,
+        overlap: float = 2.0,
+        fallback_db: float = -35.0,
     ) -> Iterator[list[Word]]:
         """按静音切分长音频，逐段转录并产出（已对齐全局时间轴的）词列表。
 
         每段转完即 yield，调用方可据此显示进度、分批写盘。切点落在静音中点，
         不打断语句，故精度与整段转录一致。短音频（<= max_chunk）退化为一次整段转录。
+
+        overlap: 取数窗口在每段逻辑区间两侧各外扩的秒数（垫料），给模型在接缝处留
+        上下文、避免把词/乐句切碎（鹿乃长时间唱歌时硬切尤甚）。转录后按「词中心落在
+        本段逻辑区间」过滤，垫料区的词归相邻段，接缝无缝去重。逻辑区间本身仍无缝相接。
+
+        fallback_db: 二次「宽松」静音阈值（应 > noise_db，越接近 0 越宽松）。当严格阈值
+        noise_db 在某段 [target,max] 区间探不到静音、本会在 max_chunk 处硬切时，改用这批
+        宽松候选找次优切点，把硬切降为真正的最后兜底。设为 <= noise_db 则关闭二次探测。
         """
         if self._pipe is None:
             self.load()
@@ -267,21 +342,41 @@ class Transcriber:
         print(f"🔍 探测静音区间（noise={noise_db}dB, d={min_silence}s）...")
         silences = detect_silences(audio_file, noise_db, min_silence)
         print(f"  找到 {len(silences)} 段静音")
-        segments = plan_segments(duration, silences, target_chunk, max_chunk)
-        print(f"✂️  规划为 {len(segments)} 段，开始分段转录\n")
+        # 宽松阈值二次探测（仅当 fallback_db 比严格阈值更宽松时才跑），给硬切段兜次优切点
+        fallback_silences: list[tuple[float, float]] | None = None
+        if fallback_db > noise_db:
+            print(f"🔍 二次宽松探测（noise={fallback_db}dB, d={min_silence}s）...")
+            fallback_silences = detect_silences(audio_file, fallback_db, min_silence)
+            print(f"  找到 {len(fallback_silences)} 段（宽松）")
+        segments = plan_segments(
+            duration, silences, target_chunk, max_chunk, fallback_silences
+        )
+        print(f"✂️  规划为 {len(segments)} 段，开始分段转录（重叠垫料 {overlap:.1f}s）\n")
 
         total = len(segments)
         with tempfile.TemporaryDirectory(prefix="kits_seg_") as tmp:
             tmp_dir = Path(tmp)
             for i, (start, end) in enumerate(segments, 1):
+                # 取数窗口在逻辑区间两侧外扩 overlap（夹在 [0, duration] 内），转录后再裁回
+                win_start = max(0.0, start - overlap)
+                win_end = min(duration, end + overlap)
                 print(
                     f"🎤 转录第 {i}/{total} 段 "
-                    f"[{start:.1f}s -> {end:.1f}s, 时长 {end - start:.1f}s]..."
+                    f"[{start:.1f}s -> {end:.1f}s, 时长 {end - start:.1f}s, "
+                    f"取数 {win_start:.1f}~{win_end:.1f}s]..."
                 )
                 seg_path = tmp_dir / f"seg_{i:04d}.wav"
-                slice_audio(audio_file, start, end, seg_path)
+                slice_audio(audio_file, win_start, win_end, seg_path)
                 words = self._transcribe_file(str(seg_path), language, beams)
                 seg_path.unlink(missing_ok=True)
+                if not words:
+                    continue
+                # 词级时间戳先加回窗口起始偏移，对齐全局时间轴
+                words = _shift_words(words, win_start)
+                # 再按「词中心落在本段逻辑区间 [start, end)」裁掉垫料区的词（首尾两端不设限）
+                lo = None if i == 1 else start
+                hi = None if i == total else end
+                words = _keep_core_words(words, lo, hi)
                 if words:
-                    yield _shift_words(words, start)
+                    yield words
         print("\n✅ 全部分段转录完成！")

@@ -34,6 +34,37 @@
 - `--separate` 集成转录、`sum` 端到端（需 GPU / DeepSeek Key）
 - separator.py 用延迟导入 + 已按官方 API 写，单测验证了构造不触发重依赖导入
 
+## 阶段 7：外层静音/重叠分段修复（2026-06-17）
+根因：用户反馈「v2.2 适配不够，尤其静音/重叠」。核查后定性——不在模型版本（v2.2 自带 pipeline 强制
+pyannote diarization + 整段处理 + 标点/时间戳分叉，反而不适合本项目，现状方向正确），而在外层 plan_segments：
+硬切无重叠 → 唱歌长无静音段被 600s 硬切拦腰截断，接缝吞字/重复；内层 stride 只管单段内部、救不了接缝。
+
+改动：
+- transcriber.py 新增纯逻辑 `_word_center` / `_keep_core_words`（中心时间归属判定 + overlap 去重）
+- transcribe_segmented 加 `overlap` 形参（默认 2s）：每段取数窗口两侧 pad → 转录 → _shift_words(按窗口起点)
+  → _keep_core_words 按词中心裁回逻辑区间（首段左/末段右不设限）。plan_segments **不动**，5 个契约测试全保住
+- slice_audio 改 `-ss {start} -i ... -t {时长}`（弃 `-to` 绝对结束，跨 ffmpeg 版本语义稳定）
+- cli 加 `--segment-overlap`（默认 2.0，0 关闭），透传到 transcribe_segmented
+- 迁移残留清理：模块 docstring + pyproject 描述 → kotoba-whisper-v2.2；language/task 仍注释但补「对单语蒸馏
+  模型为何是无操作」说明（不盲目放开，无 GPU 验不了）
+- 新增 9 个纯逻辑单测（TestWordCenter ×4 + TestKeepCoreWords ×5）
+- silence_db 二次宽松探测（用户选定方案）：plan_segments 加可选 `fallback_silences`（默认 None=原行为）；
+  transcribe_segmented 加 `fallback_db`（默认 -35，> noise_db 才二次探测），硬切前先用宽松候选找次优切点；
+  CLI `--fallback-db`。再 +4 单测（None保原行为/宽松优先于硬切/区间外回退硬切/严格优先于宽松）
+
+| 测试 | 输入 | 预期结果 | 实际结果 | 状态 |
+|------|------|---------|---------|------|
+| test_transcriber.py | 含新 13 测 | 全过 | 22 passed（原 9 + 新 13） | ✅ |
+| 全量 pytest | 含本阶段 | 全过 | 133 passed（原 120 + 13） | ✅ |
+| ruff check . | 全仓 | 无告警 | All checks passed | ✅ |
+| CLI 两新参数 | subtitle -h | 均出现 | --segment-overlap / --fallback-db 已注册 | ✅ |
+| plan_segments 5 契约 | 原测试 | 不破坏 | 全过（fallback 默认 None 行为不变） | ✅ |
+
+## 未在本会话验证（需 GPU + 真实长音频）
+- overlap 去重在真实唱歌段的去吞字/去重复效果（无 GPU，仅纯逻辑单测覆盖归属判定）
+- slice_audio 新 ffmpeg 参数在本机 ffmpeg 的实际切段精度
+- silence_db 默认值是否该放宽（-45 vs -35~-40）——属行为默认值，影响每次转录，待与用户确认再动
+
 ## 阶段 6：kotoba 适配 + 标点恢复（2026-06-15 续）
 - 根因：kotoba-whisper-v2.2 decoder_layers=2，但 alignment_heads 继承 large-v3（引用第 25 层）→ word 级时间戳 IndexError
 - 改 transcriber `_transcribe_file` → `return_timestamps=True`（chunk 级），崩溃消除

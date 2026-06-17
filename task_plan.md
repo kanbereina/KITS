@@ -6,7 +6,7 @@
 调用逻辑抽成公共客户端，保持现有分层（纯逻辑 / 重依赖解耦、延迟导入）与全部现有测试通过。
 
 ## 当前阶段
-全部完成 ✅（含阶段 6 kotoba 适配 + 标点恢复）
+阶段 7 完成 ✅（外层静音/重叠分段修复；真实音频效果待 GPU 环境验证）
 
 ## 各阶段
 
@@ -77,3 +77,31 @@
 - [x] 加 --no-punctuate（默认开）/ --punct-model + 补 8 个纯逻辑单测（假模型替身）+ 跑全量 120 过 + 更新文档
 - [x] 端到端实测（120s）：补标点后字幕 7→19 条、被 15s 硬切 5→2 条，断句在句末标点处自然切开
 - **状态：** complete
+
+## 阶段 7：外层静音/重叠分段修复（2026-06-17）
+背景：用户反馈「kotoba-whisper-v2.2 适配不够，尤其静音区间/重叠音频」。经核查根因不在模型版本，
+而在外层 plan_segments 静音分段：硬切无重叠 → 鹿乃唱歌长期无静音段被 600s 硬切拦腰截断，
+接缝处吞字/重复；内层 HF pipeline 的 stride 滑窗只解决「单段内部」重叠，救不了「段与段接缝」。
+（已确认：v2.2 自带 pipeline 强制 pyannote diarization + 整段处理 + 标点-时间戳分叉，不适合本项目，
+现状「标准 pipeline + 手工 punctuator + 静音分段」方向正确，故只修外层分段，不换 trust_remote_code。）
+
+- [x] **分段重叠去重（已完成）**：transcribe_segmented 给每段取数窗口两侧 pad overlap（默认 2s、CLI
+      `--segment-overlap`，0 关闭），转录→_shift_words 对齐全局→_keep_core_words 按词中心裁回逻辑区间；
+      首段左/末段右不设限。plan_segments 不动 → 5 个原测试契约全保住。新增 _word_center/_keep_core_words
+      纯逻辑 + 9 个单测。
+- [x] silence_db 偏严 → **区间内二次宽松探测**（用户选定）：plan_segments 加可选 `fallback_silences`
+      （默认 None=原行为不变）；transcribe_segmented 加 `fallback_db`（默认 -35，> noise_db 才二次探测），
+      严格阈值在某段探不到静音、本会硬切时改用宽松候选找次优切点，硬切降为最后兜底。CLI `--fallback-db`。
+      +4 单测（None保持原行为/宽松候选优先于硬切/区间外回退硬切/严格候选优先）
+- [x] slice_audio 改 `-ss {start} -i {file} -t {时长}`（弃 -to 绝对结束，跨 ffmpeg 版本语义稳定）
+- [x] 迁移残留：transcriber.py 模块 docstring + pyproject 描述改为 kotoba-whisper-v2.2；
+      language/task 保持注释但补「为何对单语蒸馏模型是无操作」的说明（不盲目放开，无 GPU 验不了）
+- [x] 跑全量 pytest（133 passed，原 120 + 13 新）+ ruff（All checks passed）+ CLI 两参数冒烟 OK
+- **状态：** complete（代码改动全部完成；真实长音频效果待用户在 GPU 环境验证）
+
+### 关键约束（必须保住的现有测试契约 test_transcriber.py）
+- plan_segments 返回的 (start, end) 当前语义是「输出覆盖区间」，5 个测试断言：①短音频整段 ②无缝覆盖[0,dur]
+  ③相邻段 prev[1]==nxt[0] ④硬切落在 max_chunk ⑤静音中点切。**重叠去重不能破坏「逻辑输出区间无缝相接」**，
+  故方案：plan_segments 仍返回无缝的「逻辑区间」，另出「带 pad 的取数窗口」给 slice_audio，
+  转录后按逻辑区间过滤词 → 测试契约不变、接缝无缝。
+
