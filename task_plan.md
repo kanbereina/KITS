@@ -6,7 +6,7 @@
 调用逻辑抽成公共客户端，保持现有分层（纯逻辑 / 重依赖解耦、延迟导入）与全部现有测试通过。
 
 ## 当前阶段
-阶段 7 完成 ✅（外层静音/重叠分段修复；真实音频效果待 GPU 环境验证）
+全部完成 ✅ — 已发布 v1.3.1 到 main（含阶段 7~9）。dev 与 main 内容一致。
 
 ## 各阶段
 
@@ -17,30 +17,30 @@
 - **状态：** complete
 
 ### 阶段 2：规划与结构
-- [ ] 设计公共 `deepseek.py` 客户端接口（translator + summarizer 共用）
-- [ ] 设计 `separator.py`（audio-separator 封装，延迟导入）
-- [ ] 设计 `summarizer.py` + 提示词预设 JSON schema
-- [ ] 设计 CLI 两个新子命令 + subtitle/download 的 `--separate` 集成
-- **状态：** pending
+- [x] 设计公共 `deepseek.py` 客户端接口（translator + summarizer 共用）
+- [x] 设计 `separator.py`（audio-separator 封装，延迟导入）
+- [x] 设计 `summarizer.py` + 提示词预设 JSON schema
+- [x] 设计 CLI 两个新子命令 + subtitle/download 的 `--separate` 集成
+- **状态：** complete
 
 ### 阶段 3：实现
-- [ ] 抽 `deepseek.py`，重构 `translator.py` 复用它（保持现有测试通过）
-- [ ] 写 `separator.py` + `separate` 子命令
-- [ ] 写 `summarizer.py` + 提示词预设 JSON + `sum` 子命令
-- [ ] subtitle/download 加 `--separate` 可选集成
-- [ ] 更新 pyproject.toml 依赖、__init__.py 导出
-- **状态：** pending
+- [x] 抽 `deepseek.py`，重构 `translator.py` 复用它（保持现有测试通过）
+- [x] 写 `separator.py` + `separate` 子命令
+- [x] 写 `summarizer.py` + 提示词预设 JSON + `sum` 子命令（后升级规范名 summarize）
+- [x] subtitle/download 加 `--separate` 可选集成
+- [x] 更新 pyproject.toml 依赖、__init__.py 导出
+- **状态：** complete
 
 ### 阶段 4：测试与验证
-- [ ] 为 deepseek / summarizer / separator 纯逻辑补单测
-- [ ] 跑全量 pytest + ruff，确保无回归
-- [ ] CLI 参数解析冒烟测试
-- **状态：** pending
+- [x] 为 deepseek / summarizer / separator 纯逻辑补单测
+- [x] 跑全量 pytest + ruff，确保无回归
+- [x] CLI 参数解析冒烟测试
+- **状态：** complete
 
 ### 阶段 5：交付
-- [ ] 更新 README.md 与 CLAUDE.md
-- [ ] 检查产物完整、总结交付
-- **状态：** pending
+- [x] 更新 README.md 与 CLAUDE.md
+- [x] 检查产物完整、总结交付
+- **状态：** complete
 
 ## 关键问题
 1. audio-separator 是否支持 CUDA 12.8（onnxruntime-gpu）？默认模型是哪个？→ 阶段 1 研究
@@ -104,4 +104,22 @@
   ③相邻段 prev[1]==nxt[0] ④硬切落在 max_chunk ⑤静音中点切。**重叠去重不能破坏「逻辑输出区间无缝相接」**，
   故方案：plan_segments 仍返回无缝的「逻辑区间」，另出「带 pad 的取数窗口」给 slice_audio，
   转录后按逻辑区间过滤词 → 测试契约不变、接缝无缝。
+
+## 阶段 8：句中标点断句 + 最长静音切点 + NUL 修复（2026-06-17，真实重跑驱动）
+真实 250min 直播重跑实测发现 18.2% 字幕被 15s 钳满，根因 = chunk 内部句末标点断不开（非静音切分问题）。
+- [x] 切点改「窗口内最长静音」：plan_segments 用 _longest_silence_midpoint（最长停顿=最可能语句间隙，并列取靠前）
+- [x] 句中断句：subtitle 新增 _split_internal_punctuation，把含内部句末标点的 chunk 拆成多 Word、时间戳按字符比例分配
+- [x] SrtWriter NUL 修复：__init__ 加 truncate(0)，兜底崩溃残留 + "w" 覆盖不截断尾部留下的 NUL 空洞
+- [x] 移除 _split_internal_punctuation 的死分支（meaningful 已滤末尾切点，三元 else 恒不执行）
+- [x] 实测：18.2%→~0.7% 被钳、时间倒退 0、NUL 0、覆盖完整；+13 单测，全量 148 passed
+- **状态：** complete（已并入 main，PR #8/#9）
+
+## 阶段 9：CLI 别名 + pydantic 配置校验 + 工程结构（2026-06-18）
+- [x] 5 子命令加简写别名（dl/srt/tr/sep/sum），sum 升级规范名 summarize；分发改 set_defaults(func=...)
+- [x] prompts 配置改用 pydantic 校验（PromptPreset/PromptsConfig），坏配置加载时即报错；resolve/preset_names 收进模型
+- [x] deepseek 抽 _build_payload 静态方法；全模块补 __all__、补全类型标注
+- [x] 决策：不引入 orjson/ujson（JSON 全是冷路径，收益≈0）；Word/Sentence 热路径 TypedDict 不动
+- [x] 版本号 1.3.0→1.3.1，全量 148 passed、ruff 干净
+- [x] 交付：README 展示别名、PR #10 合入 main、发布 GitHub release v1.3.1
+- **状态：** complete
 
