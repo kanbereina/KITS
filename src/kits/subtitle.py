@@ -139,11 +139,12 @@ def _split_internal_punctuation(words: list[Word]) -> list[Word]:
         if not meaningful or start is None or end is None or end <= start:
             result.append(w)
             continue
-        # 按字符比例把 [start, end] 切成若干片段
+        # 按字符比例把 [start, end] 切成若干片段。meaningful 已滤掉末尾切点
+        # （c < len(text)），故末尾必有残余文本，补上 total 作为最后一段右界。
         total = len(text)
         span = end - start
         prev = 0
-        bounds = [*meaningful, total] if meaningful[-1] != total else meaningful
+        bounds = [*meaningful, total]
         for b in bounds:
             piece = text[prev:b]
             if piece:
