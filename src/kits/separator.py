@@ -1,3 +1,19 @@
+# KITS - 鹿乃 Twitch 直播工具
+# Copyright (C) 2026 KanbeReina
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 """人声分离：封装 audio-separator（UVR/MDX 模型），从音频中分离出人声。
 
 依赖 audio-separator（内含 torch/onnxruntime），故在 CLI 中走延迟导入，避免无谓
