@@ -160,8 +160,8 @@ def _round_up_pow2_kbps(bitrate_bps: int) -> int:
     return min(p, 320)
 
 
-# audio-separator 模型（当前使用的是 MDXC，轻量模型，人声 SDR 10.2，伴奏 15.5。VIP 模型，综合表现优秀，速度与干净度兼顾）。
-# 可用 model_filename 覆盖。
+# audio-separator 模型（当前使用的是 MDXC，轻量模型，人声 SDR 10.2，伴奏 15.5。
+# VIP 模型，综合表现优秀，速度与干净度兼顾）。可用 model_filename 覆盖。
 DEFAULT_MODEL = "UVR-MDX-NET_Main_427.onnx"
 
 

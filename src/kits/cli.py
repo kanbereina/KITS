@@ -444,7 +444,7 @@ def _run_separate(args: argparse.Namespace) -> None:
 
 
 def _run_sum(args: argparse.Namespace) -> None:
-    from kits.summarizer import Summarizer, SummarizeError
+    from kits.summarizer import SummarizeError, Summarizer
 
     print("=" * 60)
     print("🤖 DeepSeek 字幕总结")
