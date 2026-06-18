@@ -52,7 +52,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - `translator.py` — `DeepSeekTranslator`，经 `deepseek.DeepSeekClient` 把日语句子逐批译成中文。`TranslationError` 继承 `DeepSeekError`（保留历史契约）。
 - `separator.py` — `VocalSeparator`，封装 audio-separator 分离人声（默认只出 Vocals 轨）。重依赖 audio-separator（含 torch/onnxruntime），**延迟导入**（`load()` 内才 import）。底层统一产出**无损 WAV** 作中间产物，最终格式/比特率由 `_encode_final` 用 ffmpeg 一次性套用。长音频按 `segment_minutes`（默认 15）切段→逐段分离→ffmpeg concat 合并，避免一次性出整轨爆内存。比特率默认对齐原音频（探音频流比特率 → 向上取整到 2 的幂 kbps、夹 [32,320]、留 5% 容差吸收 MP3 标称偏差），`--output-bitrate` 可覆盖；无损格式忽略比特率。
 - `summarizer.py` — `Summarizer`，经 `deepseek.DeepSeekClient` 对 SRT 做 AI 总结。提示词走 JSON 预设（包内 `prompts.json` + 用户 `--prompt-file` 覆盖），长字幕 map-reduce 分块。纯逻辑（`load_presets` / `resolve_preset` / `format_sentences` / `chunk_sentences`）不触网、可单测。
-- `prompts.json` — 内置总结提示词预设（timeline / summary / highlights / setlist）+ `reduce_system` 合并提示词，随包发布。
+- `data/prompts.json` — 内置总结提示词预设（timeline / summary / highlights / setlist）+ `reduce_system` 合并提示词，随包发布（置于 `data/` 子目录与 .py 源码分离）。
 - `cli.py` — argparse 子命令 `download` / `subtitle` / `translate` / `separate` / `summarize`（分别带简写别名 `dl` / `srt` / `tr` / `sep` / `sum`），把各模块串成流水线。子命令用 `set_defaults(func=...)` 绑定处理函数，别名与规范名统一分发。
 
 数据流：
@@ -74,7 +74,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 
 ## 扩展点
 
-- **新增总结预设**：直接在 `src/kits/prompts.json` 的 `presets` 里加一项（含 `description` + `system`），或让用户用 `--prompt-file` 传外部 JSON 覆盖，无需改代码。
+- **新增总结预设**：直接在 `src/kits/data/prompts.json` 的 `presets` 里加一项（含 `description` + `system`），或让用户用 `--prompt-file` 传外部 JSON 覆盖，无需改代码。
 - **新增游戏播报过滤**：在 `filters.py` 的 `GAME_CALLOUTS` / `_GAME_ALIASES` 登记词表与别名。
 - **新增 DeepSeek 能力**：复用 `deepseek.DeepSeekClient`，在 `cli.py` 加子命令（沿用延迟导入，参考 `translate` / `sum`）。
 - **换人声分离模型**：`separate --model <文件名>` 或 `subtitle --separate --separate-model <文件名>`，模型名走 audio-separator 的模型库（`uv run audio-separator --list_models` 查可用名）。`.onnx`/MDX 走 onnxruntime GPU、`.ckpt`/MDXC roformer 走 torch GPU，两条链路的加速参数语义不同（见「注意」段）。
