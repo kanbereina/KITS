@@ -1,0 +1,44 @@
+name: CI
+
+# 在 PR 到 dev / main，以及推送到这两个分支时触发
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+
+# 同一分支的新提交取消旧的在跑任务，省 runner 时间
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: 设置 Python
+        run: uv python install 3.12
+
+      # KITS 的重依赖（torch cu128 / audio-separator / transformers / punctuators）只在运行
+      # 转录、人声分离、标点恢复时才延迟导入。所有单元测试都是纯逻辑，运行时依赖仅 httpx +
+      # pydantic。故 CI 不跑 `uv sync`（会从自定义索引拉数 GB 的 CUDA 版 torch、既慢又脆），
+      # 改用 --no-project + --with 只装跑测试/lint 所需的轻量依赖。
+      # 注意：若今后给重依赖模块（transcriber/separator/punctuator）补需真实加载这些库的测试，
+      # 那部分测试需要 GPU runner，应另设 job，不要塞进这个轻量 job。
+      - name: Ruff lint
+        run: uv run --no-project --with "ruff>=0.15.17" ruff check .
+
+      - name: Pytest（纯逻辑，轻量依赖）
+        env:
+          PYTHONPATH: src
+        run: >-
+          uv run --no-project
+          --with "pytest>=9.0.3" --with httpx --with pydantic
+          python -m pytest -q
