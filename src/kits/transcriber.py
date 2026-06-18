@@ -33,10 +33,6 @@ import warnings
 from collections.abc import Iterator
 from pathlib import Path
 
-import torch
-from huggingface_hub import snapshot_download
-from transformers import pipeline
-
 from kits.subtitle import Word
 
 __all__ = [
@@ -60,6 +56,8 @@ def _silence_warnings() -> None:
 
 def require_cuda() -> str:
     """检测 CUDA 是否可用，不可用则抛错。返回设备名 "cuda"。"""
+    import torch  # 重依赖延迟导入：纯逻辑函数无需加载 torch
+
     print(f"\n📦 PyTorch 版本: {torch.__version__}")
     print(f"💻 CUDA 可用: {torch.cuda.is_available()}")
     if not torch.cuda.is_available():
@@ -262,6 +260,10 @@ class Transcriber:
 
     def load(self) -> None:
         """检查/下载模型并加载 pipeline。"""
+        import torch  # 重依赖延迟导入：构造实例与纯逻辑无需加载 GPU 栈
+        from huggingface_hub import snapshot_download
+        from transformers import pipeline
+
         _silence_warnings()
         if self.device is None:
             self.device = require_cuda()
@@ -278,10 +280,12 @@ class Transcriber:
         self._pipe = pipeline(
             "automatic-speech-recognition",
             model=self.model_id,
-            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,  # 精度（GPU float16 / CPU float32）。transformers 5.x 用 dtype，旧名 torch_dtype 已弃用
+            # 精度（GPU float16 / CPU float32）。transformers 5.x 用 dtype，旧名 torch_dtype 已弃用
+            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device=self.device,
             chunk_length_s=15,
-            model_kwargs = {"attn_implementation": "sdpa"} if torch.cuda.is_available() else {},  # 传入注意力实现配置（GPU 时启用 sdpa）
+            # 传入注意力实现配置（GPU 时启用 sdpa）
+            model_kwargs={"attn_implementation": "sdpa"} if torch.cuda.is_available() else {},
             batch_size=8,  # 批处理大小=8，表示一次性处理 8 个音频文件/片段（提高吞吐量）
             stride_length_s=(5, 3),  # 处理长音频的参数，表示滑动窗口的步长策略
         )
