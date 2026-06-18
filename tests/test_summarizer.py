@@ -22,7 +22,7 @@ class TestLoadPresets:
         assert {"timeline", "summary", "highlights", "setlist"} <= set(names)
 
     def test_builtin_default_is_timeline(self):
-        assert load_presets()["default"] == "timeline"
+        assert load_presets().default == "timeline"
 
     def test_prompt_file_overrides_and_merges(self, tmp_path):
         custom = tmp_path / "p.json"
@@ -34,9 +34,9 @@ class TestLoadPresets:
         )
         cfg = load_presets(str(custom))
         # 自定义预设并入，且内置预设仍在（浅合并）
-        assert "mine" in cfg["presets"]
-        assert "timeline" in cfg["presets"]
-        assert cfg["default"] == "mine"
+        assert "mine" in cfg.presets
+        assert "timeline" in cfg.presets
+        assert cfg.default == "mine"
 
     def test_missing_prompt_file_raises(self):
         with pytest.raises(SummarizeError):
@@ -45,6 +45,25 @@ class TestLoadPresets:
     def test_invalid_json_raises(self, tmp_path):
         bad = tmp_path / "bad.json"
         bad.write_text("{ not json", encoding="utf-8")
+        with pytest.raises(SummarizeError):
+            load_presets(str(bad))
+
+    def test_preset_missing_system_raises(self, tmp_path):
+        # 结构合法 JSON 但 preset 缺 system → pydantic 校验阶段即报错
+        bad = tmp_path / "nosystem.json"
+        bad.write_text(
+            json.dumps({"presets": {"x": {"description": "无 system"}}}),
+            encoding="utf-8",
+        )
+        with pytest.raises(SummarizeError):
+            load_presets(str(bad))
+
+    def test_empty_system_raises(self, tmp_path):
+        # system 为空串也应被拒（min_length=1）
+        bad = tmp_path / "empty.json"
+        bad.write_text(
+            json.dumps({"presets": {"x": {"system": ""}}}), encoding="utf-8"
+        )
         with pytest.raises(SummarizeError):
             load_presets(str(bad))
 

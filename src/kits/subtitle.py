@@ -9,6 +9,19 @@ from __future__ import annotations
 import re
 from typing import TypedDict
 
+__all__ = [
+    "Sentence",
+    "SrtWriter",
+    "Word",
+    "clean_text",
+    "parse_srt",
+    "seconds_to_srt_time",
+    "segment_sentences",
+    "sentences_to_srt",
+    "srt_time_to_seconds",
+    "write_srt",
+]
+
 # 判定为句子结尾的标点（日语 + 通用）
 SENTENCE_ENDINGS = ("。", "．", ".", "！", "!", "？", "?", "…", "」", "』", "】", "〉", "》")
 # 强制断句时优先切分的逗号 / 读点
@@ -126,11 +139,12 @@ def _split_internal_punctuation(words: list[Word]) -> list[Word]:
         if not meaningful or start is None or end is None or end <= start:
             result.append(w)
             continue
-        # 按字符比例把 [start, end] 切成若干片段
+        # 按字符比例把 [start, end] 切成若干片段。meaningful 已滤掉末尾切点
+        # （c < len(text)），故末尾必有残余文本，补上 total 作为最后一段右界。
         total = len(text)
         span = end - start
         prev = 0
-        bounds = [*meaningful, total] if meaningful[-1] != total else meaningful
+        bounds = [*meaningful, total]
         for b in bounds:
             piece = text[prev:b]
             if piece:

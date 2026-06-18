@@ -11,6 +11,8 @@ import httpx
 from kits.deepseek import DEFAULT_MODEL, DeepSeekClient, DeepSeekError
 from kits.subtitle import Sentence
 
+__all__ = ["DeepSeekTranslator", "TranslationError"]
+
 # 翻译系统提示：要求逐条对应、只输出译文、保持顺序与条数一致
 _SYSTEM_PROMPT = (
     "你是一个专业的字幕翻译。将用户给出的日语字幕逐条翻译成简体中文。\n"

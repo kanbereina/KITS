@@ -18,6 +18,13 @@ from __future__ import annotations
 
 from kits.subtitle import Sentence
 
+__all__ = [
+    "filter_sentences",
+    "is_game_callout",
+    "resolve_games",
+    "supported_games",
+]
+
 # 归一化时从首尾剥离的标点（不含长音符 ー，否则 セントリー -> セントリ 会破坏匹配）
 _EDGE_PUNCT = "。．.、，,!！?？…‥・「」『』【】（）()〜~　 \t\n"
 
