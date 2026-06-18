@@ -13,8 +13,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from pydantic import BaseModel, Field, ValidationError
+
 from kits.deepseek import DEFAULT_MODEL, DeepSeekClient, DeepSeekError
 from kits.subtitle import Sentence, seconds_to_srt_time
+
+__all__ = [
+    "PromptPreset",
+    "PromptsConfig",
+    "SummarizeError",
+    "Summarizer",
+    "available_presets",
+    "chunk_sentences",
+    "format_sentences",
+    "load_presets",
+    "resolve_preset",
+]
 
 # 包内置预设文件
 _BUILTIN_PROMPTS = Path(__file__).with_name("prompts.json")
@@ -24,16 +38,53 @@ class SummarizeError(RuntimeError):
     """总结过程中的错误（预设缺失、API 失败等）。"""
 
 
+class PromptPreset(BaseModel):
+    """单个总结预设：描述 + system 提示词。"""
+
+    description: str = ""
+    system: str = Field(min_length=1)
+
+
+class PromptsConfig(BaseModel):
+    """提示词配置整体结构。
+
+    加载时即校验：presets 至少一项、每项含非空 system，default（若给）必须存在于
+    presets。坏配置在此处即抛清晰错误，而非延迟到取 presets[name]["system"] 时才 KeyError。
+    """
+
+    presets: dict[str, PromptPreset] = Field(min_length=1)
+    default: str | None = None
+    reduce_system: str = ""
+
+    def resolve(self, name: str | None) -> tuple[str, str]:
+        """解析预设名，返回 (预设名, system 提示词)。
+
+        name 为 None 时用 default。未知预设抛 SummarizeError 并列出可用项。
+        """
+        chosen = name or self.default
+        if chosen not in self.presets:
+            raise SummarizeError(
+                f"不支持的总结预设: {chosen!r}。当前可用: {', '.join(sorted(self.presets))}"
+            )
+        return chosen, self.presets[chosen].system
+
+    @property
+    def preset_names(self) -> list[str]:
+        """所有可用预设名（已排序）。"""
+        return sorted(self.presets)
+
+
 def _hms(seconds: float) -> str:
     """秒 -> HH:MM:SS（丢掉毫秒，总结里用不到那么细）。"""
     return seconds_to_srt_time(seconds).split(",")[0]
 
 
-def load_presets(prompt_file: str | None = None) -> dict:
-    """加载提示词预设。
+def load_presets(prompt_file: str | None = None) -> PromptsConfig:
+    """加载并校验提示词预设，返回 PromptsConfig。
 
     先读包内置 prompts.json；若传入 prompt_file，则用其内容覆盖（浅合并 presets、
-    顶层键如 default/reduce_system 也可覆盖）。返回完整配置 dict。
+    顶层键如 default/reduce_system 也可覆盖）。结构错误（缺 system、presets 为空等）
+    在 pydantic 校验阶段即抛 SummarizeError。
     """
     config: dict = json.loads(_BUILTIN_PROMPTS.read_text(encoding="utf-8"))
 
@@ -50,12 +101,15 @@ def load_presets(prompt_file: str | None = None) -> dict:
         config.update(user)
         config["presets"] = merged_presets
 
-    return config
+    try:
+        return PromptsConfig.model_validate(config)
+    except ValidationError as e:
+        raise SummarizeError(f"提示词配置结构不合法: {e}") from e
 
 
 def available_presets(prompt_file: str | None = None) -> list[str]:
     """返回所有可用预设名（已排序），用于 CLI 帮助 / 报错提示。"""
-    return sorted(load_presets(prompt_file).get("presets", {}))
+    return load_presets(prompt_file).preset_names
 
 
 def resolve_preset(name: str | None, prompt_file: str | None = None) -> tuple[str, str]:
@@ -63,17 +117,7 @@ def resolve_preset(name: str | None, prompt_file: str | None = None) -> tuple[st
 
     name 为 None 时用配置里的 default。未知预设抛 SummarizeError 并列出可用项。
     """
-    config = load_presets(prompt_file)
-    presets = config.get("presets", {})
-    if not presets:
-        raise SummarizeError("提示词配置中没有任何预设")
-
-    chosen = name or config.get("default")
-    if chosen not in presets:
-        raise SummarizeError(
-            f"不支持的总结预设: {chosen!r}。当前可用: {', '.join(sorted(presets))}"
-        )
-    return chosen, presets[chosen]["system"]
+    return load_presets(prompt_file).resolve(name)
 
 
 def format_sentences(sentences: list[Sentence]) -> str:
@@ -122,8 +166,9 @@ class Summarizer:
         timeout: float = 180.0,
     ):
         # 先解析预设（可能抛 SummarizeError），再建客户端
-        self.preset_name, self._system = resolve_preset(preset, prompt_file)
-        self._reduce_system = load_presets(prompt_file).get("reduce_system", "")
+        config = load_presets(prompt_file)
+        self.preset_name, self._system = config.resolve(preset)
+        self._reduce_system = config.reduce_system
         try:
             self._client = DeepSeekClient(api_key=api_key, model=model, timeout=timeout)
         except DeepSeekError as e:

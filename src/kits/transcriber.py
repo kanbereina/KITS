@@ -23,6 +23,16 @@ from transformers import pipeline
 
 from kits.subtitle import Word
 
+__all__ = [
+    "MODEL_ID",
+    "Transcriber",
+    "detect_silences",
+    "plan_segments",
+    "probe_duration",
+    "require_cuda",
+    "slice_audio",
+]
+
 MODEL_ID = "kotoba-tech/kotoba-whisper-v2.2"
 
 

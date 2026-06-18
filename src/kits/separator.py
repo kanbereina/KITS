@@ -17,6 +17,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+__all__ = ["DEFAULT_MODEL", "SeparationError", "VocalSeparator"]
+
 
 def _expose_torch_cuda_dlls() -> None:
     """把 torch 自带的 CUDA 12 / cuDNN 9 dll 目录加入 DLL 搜索路径。

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from kits.subtitle import Word
 
+__all__ = ["DEFAULT_PUNCT_MODEL", "Punctuator"]
+
 # kotoba 官方同款标点模型
 DEFAULT_PUNCT_MODEL = "1-800-BAD-CODE/xlm-roberta_punctuation_fullstop_truecase"
 

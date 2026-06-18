@@ -8,8 +8,16 @@ from __future__ import annotations
 
 import json
 import os
+from typing import Any
 
 import httpx
+
+__all__ = [
+    "DEEPSEEK_API_URL",
+    "DEFAULT_MODEL",
+    "DeepSeekClient",
+    "DeepSeekError",
+]
 
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 DEFAULT_MODEL = "deepseek-chat"
@@ -57,6 +65,21 @@ class DeepSeekClient:
         with httpx.Client(timeout=self.timeout) as own:
             return self._post(own, system_prompt, user_content, temperature)
 
+    @staticmethod
+    def _build_payload(
+        model: str, system_prompt: str, user_content: str, temperature: float
+    ) -> dict[str, Any]:
+        """组装 chat/completions 请求体。"""
+        return {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": temperature,
+            "stream": False,
+        }
+
     def _post(
         self,
         client: httpx.Client,
@@ -70,15 +93,9 @@ class DeepSeekClient:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                "temperature": temperature,
-                "stream": False,
-            },
+            json=self._build_payload(
+                self.model, system_prompt, user_content, temperature
+            ),
         )
         if resp.status_code != 200:
             raise DeepSeekError(

@@ -1,7 +1,7 @@
 """KITS：鹿乃 Twitch 直播工具。
 
 子命令：download（下载合并 MP4）、subtitle（音频转 SRT）、translate（日译中）、
-separate（人声分离）、sum（DeepSeek 总结）。
+separate（人声分离）、summarize（DeepSeek 总结）。
 
 此处仅导出纯逻辑的字幕数据契约与函数（无 torch / httpx 依赖）；
 重依赖模块（transcriber/translator/separator/summarizer）按需从各自模块导入，
