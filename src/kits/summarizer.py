@@ -30,8 +30,8 @@ __all__ = [
     "resolve_preset",
 ]
 
-# 包内置预设文件
-_BUILTIN_PROMPTS = Path(__file__).with_name("prompts.json")
+# 包内置预设文件（随包发布的包数据，置于 data/ 子目录与 .py 源码分离）
+_BUILTIN_PROMPTS = Path(__file__).with_name("data") / "prompts.json"
 
 
 class SummarizeError(RuntimeError):

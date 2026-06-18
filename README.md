@@ -380,7 +380,8 @@ src/kits/
   translator.py    # 调用 DeepSeek 把日语 SRT 翻译成中文 SRT（经 deepseek 客户端）
   separator.py     # 人声分离：封装 audio-separator（延迟导入，默认只出 Vocals 轨）
   summarizer.py    # 调用 DeepSeek 总结 SRT，提示词走 JSON 预设、长字幕 map-reduce 分块
-  prompts.json     # 内置总结提示词预设（timeline / summary / highlights / setlist）
+  data/
+    prompts.json   # 内置总结提示词预设（timeline / summary / highlights / setlist）
   cli.py           # 命令行入口（download / subtitle / translate / separate / summarize 子命令，各带简写别名）
 main.py            # 薄入口，委托给 kits.cli
 ```
