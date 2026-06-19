@@ -55,6 +55,9 @@ SUPPORTED_MODELS = (
     "kotoba-tech/kotoba-whisper-v2.0",
 )
 
+# 默认模型必须在白名单内（CLI 的 --model 默认值取自 MODEL_ID）
+assert MODEL_ID in SUPPORTED_MODELS
+
 
 def _silence_warnings() -> None:
     warnings.filterwarnings("ignore", category=FutureWarning)
