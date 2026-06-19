@@ -37,6 +37,7 @@ from kits.subtitle import Word
 
 __all__ = [
     "MODEL_ID",
+    "SUPPORTED_MODELS",
     "Transcriber",
     "detect_silences",
     "plan_segments",
@@ -46,6 +47,16 @@ __all__ = [
 ]
 
 MODEL_ID = "kotoba-tech/kotoba-whisper-v2.2"
+
+# 支持的转录模型白名单。两者同构（large-v3 全编码器 + 2 层解码器），
+# 故都走 chunk 级时间戳 + 标点恢复这条链；CLI 的 --model 用它限定可选值。
+SUPPORTED_MODELS = (
+    "kotoba-tech/kotoba-whisper-v2.2",
+    "kotoba-tech/kotoba-whisper-v2.0",
+)
+
+# 默认模型必须在白名单内（CLI 的 --model 默认值取自 MODEL_ID）
+assert MODEL_ID in SUPPORTED_MODELS
 
 
 def _silence_warnings() -> None:

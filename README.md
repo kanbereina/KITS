@@ -175,6 +175,7 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | --- | --- | --- |
 | `-i, --input` | （必填） | 输入音频文件路径 |
 | `-o, --output` | `subtitle.srt` | 输出 SRT 文件路径 |
+| `--model` | `kotoba-tech/kotoba-whisper-v2.2` | 转录模型，可选 `kotoba-tech/kotoba-whisper-v2.2` / `kotoba-tech/kotoba-whisper-v2.0`（同构，均走 chunk 级时间戳 + 标点恢复） |
 | `--language` | `japanese` | 识别语言 |
 | `--beams` | `1` | beam search 数量，`1` 为贪心解码，更快 |
 | `--max-gap` | `0.7` | 判定断句的最大停顿（秒），越小切得越碎 |
@@ -193,6 +194,20 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | `--separate-output-bitrate` | 自动对齐原音频 | 人声输出比特率（如 `128k`），无损格式忽略，仅在 `--separate` 时生效 |
 | `--no-punctuate` | （默认补标点） | 关闭标点恢复；模型本身已输出标点时可关 |
 | `--punct-model` | xlm-roberta 日语句读 | 标点恢复模型 |
+
+#### 选择转录模型（--model）
+
+默认 `kotoba-tech/kotoba-whisper-v2.2`。可用 `--model` 切换到 `kotoba-tech/kotoba-whisper-v2.0`，方便对比识别效果：
+
+```bash
+# 默认 v2.2
+uv run kits subtitle -i live.mp3 -o v22.srt
+
+# 换用 v2.0
+uv run kits subtitle -i live.mp3 -o v20.srt --model kotoba-tech/kotoba-whisper-v2.0
+```
+
+两者同构（large-v3 全编码器 + 2 层解码器），均走 chunk 级时间戳 + 标点恢复链路。`download --srt` 也支持 `--model`。仅限白名单内的模型，传入其他名字会报错。
 
 #### 标点恢复（默认开启）
 
