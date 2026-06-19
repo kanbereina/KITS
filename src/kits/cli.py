@@ -41,6 +41,15 @@ from kits.subtitle import (
 
 def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
     """断句相关参数，download 和 subtitle 子命令共用。"""
+    # 转录模型白名单（延迟导入：transcriber 顶层已无重依赖，仅取常量不会拉起 torch）
+    from kits.transcriber import MODEL_ID, SUPPORTED_MODELS
+
+    parser.add_argument(
+        "--model",
+        default=MODEL_ID,
+        choices=SUPPORTED_MODELS,
+        help=f"转录模型(默认 {MODEL_ID})；可选 kotoba-whisper v2.2 / v2.0",
+    )
     parser.add_argument("--language", default="japanese", help="识别语言")
     parser.add_argument("--beams", type=int, default=1, help="beam search 数量(1=贪心,更快)")
     parser.add_argument("--max-gap", type=float, default=0.7, help="判定断句的最大停顿(秒)")
@@ -261,7 +270,7 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
 
     audio_file = _maybe_separate(audio_file, args)
 
-    transcriber = Transcriber()
+    transcriber = Transcriber(model_id=args.model)
     all_sentences: list[Sentence] = []
     filtered_total = 0
 
@@ -444,7 +453,7 @@ def _run_separate(args: argparse.Namespace) -> None:
 
 
 def _run_sum(args: argparse.Namespace) -> None:
-    from kits.summarizer import Summarizer, SummarizeError
+    from kits.summarizer import SummarizeError, Summarizer
 
     print("=" * 60)
     print("🤖 DeepSeek 字幕总结")

@@ -1,6 +1,6 @@
 [project]
 name = "KITS"
-version = "1.3.1"
+version = "1.4.0"
 description = "基于 kotoba-whisper-v2.2 的鹿乃 Twitch 直播总结工具，支持 50 系 Nvidia 显卡"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -41,6 +41,16 @@ torchaudio = { index = "pytorch-cu128" }
 # CUDAExecutionProvider 丢失、.onnx 人声分离退回 CPU。这里强制改写为 gpu 版。
 [tool.uv]
 override-dependencies = ["onnxruntime ; sys_platform == 'never'"]
+
+# 行宽 120：本项目注释/字符串多为中文（视觉宽度约 2 倍），120 比默认 88 更合身。
+# 规则集 E（pycodestyle）+ F（pyflakes）+ I（isort 导入排序）：格式与正确性基础三件套。
+# B/UP/SIM 等质量增强规则留待后续单独 PR 引入，避免与协作基建改动混在一起。
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
 
 [dependency-groups]
 dev = [
