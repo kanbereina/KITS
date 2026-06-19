@@ -64,7 +64,7 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
         help=f"转录模型(默认 {MODEL_ID})；可选 kotoba-whisper v2.2 / v2.0",
     )
     parser.add_argument("--language", default="japanese", help="识别语言")
-    parser.add_argument("--beams", type=int, default=1, help="beam search 数量(1=贪心,更快)")
+    parser.add_argument("--beams", type=int, default=3, help="beam search 数量(默认3更稳;1=贪心,更快)")
     parser.add_argument("--max-gap", type=float, default=0.7, help="判定断句的最大停顿(秒)")
     parser.add_argument("--max-chars", type=int, default=60, help="单条字幕最大字符数")
     parser.add_argument("--max-duration", type=float, default=15.0, help="单条字幕最大时长(秒)")

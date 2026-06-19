@@ -177,7 +177,7 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | `-o, --output` | `subtitle.srt` | 输出 SRT 文件路径 |
 | `--model` | `kotoba-tech/kotoba-whisper-v2.2` | 转录模型，可选 `kotoba-tech/kotoba-whisper-v2.2` / `kotoba-tech/kotoba-whisper-v2.0`（同构，均走 chunk 级时间戳 + 标点恢复） |
 | `--language` | `japanese` | 识别语言 |
-| `--beams` | `1` | beam search 数量，`1` 为贪心解码，更快 |
+| `--beams` | `3` | beam search 数量，默认 `3` 更稳；`1` 为贪心解码，更快 |
 | `--max-gap` | `0.7` | 判定断句的最大停顿（秒），越小切得越碎 |
 | `--max-chars` | `60` | 单条字幕最大字符数 |
 | `--max-duration` | `15.0` | 单条字幕最大时长（秒） |
