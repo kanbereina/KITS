@@ -22,6 +22,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import httpx
 
 from kits.deepseek import DEFAULT_MODEL, DeepSeekClient, DeepSeekError
@@ -98,22 +100,21 @@ class DeepSeekTranslator:
         # 缺失的条目用占位，避免时间轴错位
         return [t if t is not None else "" for t in translations]
 
-    def translate(self, sentences: list[Sentence]) -> list[Sentence]:
-        """翻译整个句子列表，返回文本替换为中文、时间戳不变的新列表。"""
+    def translate_iter(
+        self, sentences: list[Sentence]
+    ) -> Iterator[tuple[list[Sentence], int, int]]:
+        """逐批翻译并流式产出，便于调用方边翻译边写盘、显示进度。
+
+        每翻完一批 yield ``(本批译好的句子, 已完成条数, 总条数)``。批次严格按顺序
+        串行处理（无并发），故产出顺序与原字幕顺序一致，可安全增量写盘。
+        """
         if not sentences:
-            return []
+            return
 
         total = len(sentences)
-        result: list[Sentence] = []
         with httpx.Client(timeout=self.timeout) as client:
             for start in range(0, total, self.batch_size):
                 batch = sentences[start : start + self.batch_size]
-                batch_no = start // self.batch_size + 1
-                batch_total = (total + self.batch_size - 1) // self.batch_size
-                print(
-                    f"🌐 翻译批次 {batch_no}/{batch_total} "
-                    f"（{start + 1}-{start + len(batch)}/{total} 条）..."
-                )
                 content = self._client.chat(
                     _SYSTEM_PROMPT,
                     self._build_user_content(batch),
@@ -121,14 +122,20 @@ class DeepSeekTranslator:
                     client=client,
                 )
                 texts = self._parse_response(content, len(batch))
-                for sent, text in zip(batch, texts):
-                    # 译文为空时回退到原文，宁可保留日语也不丢字幕
-                    result.append(
-                        {
-                            "start": sent["start"],
-                            "end": sent["end"],
-                            "text": text or sent["text"],
-                        }
-                    )
-        print(f"✅ 翻译完成，共 {len(result)} 条字幕")
+                batch_result: list[Sentence] = [
+                    {
+                        "start": sent["start"],
+                        "end": sent["end"],
+                        # 译文为空时回退到原文，宁可保留日语也不丢字幕
+                        "text": text or sent["text"],
+                    }
+                    for sent, text in zip(batch, texts)
+                ]
+                yield batch_result, start + len(batch), total
+
+    def translate(self, sentences: list[Sentence]) -> list[Sentence]:
+        """翻译整个句子列表，返回文本替换为中文、时间戳不变的新列表。"""
+        result: list[Sentence] = []
+        for batch_result, _done, _total in self.translate_iter(sentences):
+            result.extend(batch_result)
         return result

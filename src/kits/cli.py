@@ -35,8 +35,21 @@ from kits.subtitle import (
     SrtWriter,
     parse_srt,
     segment_sentences,
-    write_srt,
 )
+
+
+def _print_progress(done: int, total: int, prefix: str = "进度", width: int = 30) -> None:
+    """单行刷新的文本进度条。无第三方依赖，兼容 Windows 终端。
+
+    用 \\r 回到行首覆盖上一次输出，故同一行原地更新而非逐行刷屏。
+    """
+    if total <= 0:
+        return
+    ratio = min(done / total, 1.0)
+    filled = int(width * ratio)
+    bar = "█" * filled + "░" * (width - filled)
+    sys.stdout.write(f"\r{prefix} |{bar}| {ratio * 100:5.1f}% ({done}/{total})")
+    sys.stdout.flush()
 
 
 def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
@@ -411,14 +424,24 @@ def _run_translate(args: argparse.Namespace) -> None:
     translator = DeepSeekTranslator(
         api_key=args.api_key, model=args.model, batch_size=args.batch_size
     )
-    translated = translator.translate(sentences)
-    write_srt(translated, str(output_path))
 
-    print(f"\n✅ 中文字幕已保存到: {output_path}")
+    # 边翻译边写盘：批次严格串行（无并发），故产出顺序即字幕顺序，可安全增量写。
+    # 中途中断时已写入部分仍是合法 SRT。进度用单行刷新的进度条展示。
+    total = len(sentences)
+    preview: list[Sentence] = []
+    with SrtWriter(str(output_path)) as writer:
+        for batch_result, done, _total in translator.translate_iter(sentences):
+            writer.append(batch_result)
+            if len(preview) < 10:
+                preview.extend(batch_result[: 10 - len(preview)])
+            _print_progress(done, total, prefix="🌐 翻译进度")
+    print()  # 进度条结束后换行
+
+    print(f"\n✅ 中文字幕已保存到: {output_path}（共 {total} 条）")
     print("\n📝 预览前10条:")
-    for i, sent in enumerate(translated[:10], 1):
-        preview = sent["text"][:50] + ("..." if len(sent["text"]) > 50 else "")
-        print(f"{i:3d}. [{sent['start']:6.1f}s -> {sent['end']:6.1f}s] {preview}")
+    for i, sent in enumerate(preview, 1):
+        text = sent["text"][:50] + ("..." if len(sent["text"]) > 50 else "")
+        print(f"{i:3d}. [{sent['start']:6.1f}s -> {sent['end']:6.1f}s] {text}")
     print("\n💡 提示: 可以直接将 SRT 文件拖入播放器或视频编辑软件使用")
 
 
