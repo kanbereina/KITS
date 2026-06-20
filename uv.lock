@@ -592,7 +592,7 @@ wheels = [
 
 [[package]]
 name = "kits"
-version = "1.5.2"
+version = "1.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "audio-separator" },
@@ -605,6 +605,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform != 'darwin'" },
     { name = "torch", version = "2.12.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
+    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -625,6 +626,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "torch", marker = "sys_platform != 'darwin'", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torch", marker = "sys_platform == 'darwin'", specifier = ">=2.11.0" },
+    { name = "tqdm", specifier = ">=4.66.0" },
     { name = "transformers", specifier = ">=5.12.0" },
 ]
 
