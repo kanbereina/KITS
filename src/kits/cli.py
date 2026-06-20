@@ -68,6 +68,13 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-gap", type=float, default=0.7, help="判定断句的最大停顿(秒)")
     parser.add_argument("--max-chars", type=int, default=60, help="单条字幕最大字符数")
     parser.add_argument("--max-duration", type=float, default=15.0, help="单条字幕最大时长(秒)")
+    parser.add_argument(
+        "--max-seconds-per-char",
+        type=float,
+        default=0.5,
+        help="单条字幕每字符最大时长(秒)，治蒸馏模型 chunk 时间戳虚高(短句标成满 max-duration)；"
+        "按字符数估算朗读时长上限、超出则收缩 end(只缩时长不改文本)。默认 0.5(日语≥2字/秒)；<=0 关闭",
+    )
     # 长音频分段转录（按静音切分）。短音频会自动整段转录。
     parser.add_argument("--target-chunk", type=float, default=300.0, help="分段目标时长(秒)")
     parser.add_argument("--max-chunk", type=float, default=600.0, help="单段硬上限时长(秒)")
@@ -331,6 +338,7 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
                 max_gap=args.max_gap,
                 max_chars=args.max_chars,
                 max_duration=args.max_duration,
+                max_seconds_per_char=args.max_seconds_per_char,
             )
             if callouts is not None:
                 from kits.filters import filter_sentences
