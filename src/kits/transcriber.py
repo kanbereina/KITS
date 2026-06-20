@@ -42,7 +42,7 @@ __all__ = [
     "detect_silences",
     "plan_segments",
     "probe_duration",
-    "require_cuda",
+    "select_device",
     "slice_audio",
 ]
 
@@ -65,18 +65,25 @@ def _silence_warnings() -> None:
     warnings.filterwarnings("ignore", message=".*custom logits processor.*")
 
 
-def require_cuda() -> str:
-    """检测 CUDA 是否可用，不可用则抛错。返回设备名 "cuda"。"""
+def select_device() -> str:
+    """选择转录设备：优先 CUDA，其次 Apple Silicon 的 MPS，都没有则抛错。
+
+    转录强制要求 GPU 加速（CUDA 或 MPS）：纯 CPU 跑 Whisper 慢到不可用，故不回落
+    CPU，宁可早抛错让用户知道环境不对。返回 "cuda" 或 "mps"。
+    """
     import torch  # 重依赖延迟导入：纯逻辑函数无需加载 torch
 
     print(f"\n📦 PyTorch 版本: {torch.__version__}")
-    print(f"💻 CUDA 可用: {torch.cuda.is_available()}")
-    if not torch.cuda.is_available():
-        raise RuntimeError("请安装 GPU 版本的 CUDA！")
-    print(f"🔧 CUDA 版本: {torch.version.cuda}")
-    print(f"🎮 GPU 数量: {torch.cuda.device_count()}")
-    print(f"🖥️  当前 GPU: {torch.cuda.get_device_name(0)}")
-    return "cuda"
+    if torch.cuda.is_available():
+        print("💻 CUDA 可用: True")
+        print(f"🔧 CUDA 版本: {torch.version.cuda}")
+        print(f"🎮 GPU 数量: {torch.cuda.device_count()}")
+        print(f"🖥️  当前 GPU: {torch.cuda.get_device_name(0)}")
+        return "cuda"
+    if torch.backends.mps.is_available():
+        print("🍎 Apple Silicon MPS 可用: True")
+        return "mps"
+    raise RuntimeError("未检测到可用 GPU：需要 CUDA(Nvidia) 或 MPS(Apple Silicon) 设备！")
 
 
 # silencedetect 输出形如：[silencedetect @ ...] silence_start: 12.34
@@ -277,7 +284,7 @@ class Transcriber:
 
         _silence_warnings()
         if self.device is None:
-            self.device = require_cuda()
+            self.device = select_device()
         print(f"🤖 使用模型: {self.model_id}")
 
         print("\n📥 检查/下载模型...")
@@ -288,15 +295,19 @@ class Transcriber:
             print(f"⚠️  模型下载警告（尝试使用本地缓存）: {e}")
 
         print("\n🚀 加载模型...")
+        # GPU(CUDA/MPS) 用 float16 + sdpa 提速降显存；非 GPU（理论上 select_device 已拦下）
+        # 退回 float32、不指定 attn 实现。键于解析后的设备名而非 cuda.is_available()，
+        # 使 MPS 与 CUDA 同享半精度 + sdpa 路径。
+        use_gpu = self.device in ("cuda", "mps")
         self._pipe = pipeline(
             "automatic-speech-recognition",
             model=self.model_id,
             # 精度（GPU float16 / CPU float32）。transformers 5.x 用 dtype，旧名 torch_dtype 已弃用
-            dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            dtype=torch.float16 if use_gpu else torch.float32,
             device=self.device,
             chunk_length_s=15,
             # 传入注意力实现配置（GPU 时启用 sdpa）
-            model_kwargs={"attn_implementation": "sdpa"} if torch.cuda.is_available() else {},
+            model_kwargs={"attn_implementation": "sdpa"} if use_gpu else {},
             batch_size=8,  # 批处理大小=8，表示一次性处理 8 个音频文件/片段（提高吞吐量）
             stride_length_s=(5, 3),  # 处理长音频的参数，表示滑动窗口的步长策略
         )

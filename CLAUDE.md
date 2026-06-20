@@ -28,7 +28,8 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 注意：
 
 - PyTorch 从自定义索引 `pytorch-cu128`（CUDA 12.8）安装，见 `pyproject.toml` 的 `[tool.uv.sources]`。不要把 torch 换成 PyPI 默认源。
-- 转录（`subtitle` / `download --srt`）强制要求可用的 CUDA GPU，CPU 环境会直接抛错。
+- 转录（`subtitle` / `download --srt`）强制要求 GPU 加速：CUDA(Nvidia) 或 MPS(Apple Silicon)，纯 CPU 环境会直接抛错（设备选择见 `transcriber.select_device()`，优先 CUDA、其次 MPS）。
+- **依赖按平台分流**（见 `pyproject.toml`）：Linux/Win 走 CUDA 栈（torch `pytorch-cu128` + `onnxruntime-gpu` + `audio-separator[gpu]`）；macOS(Apple Silicon) 无 CUDA 轮子，自动落到 PyPI 默认源 torch（自带 MPS）+ `onnxruntime`(CPU/CoreML) + `audio-separator[cpu]`。关键三处：torch 源用 `marker = "sys_platform != 'darwin'"` 仅对非 darwin 生效、`pytorch-cu128` 索引置 `explicit = true`（否则 torch 被绑死该索引、mac 不回落 PyPI）、`required-environments` 声明 darwin-arm64（强制 uv 为 mac 单独求解出有 arm64 轮子的 torch 版本，否则通用解析会把全平台锁到 `+cu128` 本地版导致 mac sync 失败）。`override-dependencies` 的 onnxruntime 禁装 marker 改为 `sys_platform == 'darwin'`：mac 上*需要* CPU 版、非 darwin 才禁（防 CPU 版顶掉 GPU 版 dll）。改依赖后 `uv lock` 会按平台分出两份 torch stanza。
 - 默认模型 `kotoba-tech/kotoba-whisper-v2.2`（日语识别更准的蒸馏模型）。它只产 chunk 级时间戳、不带句末标点，故转录后默认走 `punctuator` 标点恢复再断句（`--no-punctuate` 关闭）。换用本身带 word 级时间戳 + 标点的模型时可关。
 - 合并 MP4、提取 MP3 依赖系统 `ffmpeg`，须在 PATH 中。
 - `translate` / `sum` 需要 DeepSeek API Key，走 `--api-key` 或环境变量 `DEEPSEEK_API_KEY`。

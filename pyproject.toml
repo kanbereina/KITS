@@ -9,11 +9,15 @@ authors = [
     { name = "KanbeReina", email = "kano.2525@qq.com" }
 ]
 requires-python = ">=3.12,<3.15"
+# GPU 依赖按平台分流：Linux/Win 走 CUDA 栈（onnxruntime-gpu + audio-separator[gpu]），
+# macOS(Apple Silicon) 无 CUDA 轮子，走 CPU/CoreML 栈（onnxruntime + audio-separator[cpu]）
+# + torch MPS（torch 源的 cu128 改写仅对非 darwin 生效，见 [tool.uv.sources]）。
 dependencies = [
-    "audio-separator[gpu]>=0.44.0",
+    "audio-separator[gpu]>=0.44.0 ; sys_platform != 'darwin'",
+    "audio-separator[cpu]>=0.44.0 ; sys_platform == 'darwin'",
     "httpx>=0.28.1",
     "huggingface-hub>=1.19.0",
-    "onnxruntime-gpu>=1.26.0",
+    "onnxruntime-gpu>=1.26.0 ; sys_platform != 'darwin'",
     "punctuators>=0.0.7",
     "pydantic>=2.13.4",
     "torch>=2.11.0",
@@ -30,17 +34,28 @@ build-backend = "uv_build"
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+# explicit：该索引仅在 [tool.uv.sources] 显式引用时使用，不进全局候选池。否则 uv 会把
+# torch 绑死到本索引、对 darwin 也不回落 PyPI，触发 dependency-confusion 报错。
+explicit = true
 
+# torch 系列在 Linux/Win 走 cu128（CUDA 12.8）；macOS 无 cu128 轮子，marker 排除 darwin
+# 后自动落回 PyPI 默认源（自带 MPS 的 arm64 轮子）。勿删 marker，否则 mac 解析失败。
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }
+torchvision = { index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }
+torchaudio = { index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }
 
-# punctuators 间接依赖 CPU 版 onnxruntime，会覆盖 audio-separator[gpu] 装的
+# punctuators 间接依赖 CPU 版 onnxruntime，在 Linux/Win 会覆盖 audio-separator[gpu] 装的
 # onnxruntime-gpu（同装一个 onnxruntime/ 目录、CPU 版 dll 顶掉 GPU 版），导致
-# CUDAExecutionProvider 丢失、.onnx 人声分离退回 CPU。这里强制改写为 gpu 版。
+# CUDAExecutionProvider 丢失、.onnx 人声分离退回 CPU。故在非 darwin 上禁止 CPU 版被装入
+# （marker 不成立 = 该版本不可解析）；macOS 上反而*需要* CPU 版 onnxruntime，不能禁，
+# 所以 marker 限定为非 darwin。
 [tool.uv]
-override-dependencies = ["onnxruntime ; sys_platform == 'never'"]
+override-dependencies = ["onnxruntime ; sys_platform == 'darwin'"]
+# 强制 uv 为 macOS(Apple Silicon) 单独求解出有 arm64 轮子的版本，否则通用解析会
+# 把全平台统一锁到 torch 的 +cu128 本地版（无 mac 轮子）导致 sync 失败。声明此必需
+# 环境后，darwin 会单独落到 PyPI 默认源、自带 MPS 的 arm64 torch 版本。
+required-environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
 
 # 行宽 120：本项目注释/字符串多为中文（视觉宽度约 2 倍），120 比默认 88 更合身。
 # 规则集 E（pycodestyle）+ F（pyflakes）+ I（isort 导入排序）：格式与正确性基础三件套。
