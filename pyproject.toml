@@ -1,6 +1,6 @@
 [project]
 name = "KITS"
-version = "1.5.2"
+version = "1.6.0"
 description = "基于 kotoba-whisper-v2.2 的鹿乃 Twitch 直播总结工具，支持 50 系 Nvidia 显卡"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -17,6 +17,7 @@ dependencies = [
     "punctuators>=0.0.7",
     "pydantic>=2.13.4",
     "torch>=2.11.0",
+    "tqdm>=4.66.0",
     "transformers>=5.12.0",
 ]
 

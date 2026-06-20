@@ -39,6 +39,7 @@ __all__ = [
     "MODEL_ID",
     "SUPPORTED_MODELS",
     "Transcriber",
+    "configure_logging",
     "detect_silences",
     "plan_segments",
     "probe_duration",
@@ -59,10 +60,77 @@ SUPPORTED_MODELS = (
 assert MODEL_ID in SUPPORTED_MODELS
 
 
-def _silence_warnings() -> None:
-    warnings.filterwarnings("ignore", category=FutureWarning)
-    warnings.filterwarnings("ignore", message=".*clean_up_tokenization_spaces.*")
-    warnings.filterwarnings("ignore", message=".*custom logits processor.*")
+# 日志噪音是否已被显式配置（CLI 入口按 --verbose 设置）。库被直接调用且未配置时，
+# Transcriber.load() 兜底以安静模式配置一次，避免刷屏。
+_LOGGING_CONFIGURED = False
+# 当前是否 verbose（调试）模式。安静模式下，分段转录的逐段边界细节收进进度条而不刷屏。
+_VERBOSE = False
+
+
+def configure_logging(verbose: bool = False) -> None:
+    """统一调节底层库的日志噪音。verbose=True 时全部放行（调试用），否则压到最低。
+
+    转录链路的刷屏日志有三个来源，且大多不是 Python warnings、`warnings.filterwarnings`
+    拦不住，需各自的 API 关闭：
+      1. transformers 5.x 的 logging（`Passing generation_config...`、`custom logits
+         processor`、`did not predict ending timestamp`、`clean_up_tokenization_spaces`
+         等）——每段转录都重复打，靠 transformers.utils.logging 调级别 + 关进度条。
+      2. huggingface_hub 的下载/加载进度条（`Fetching N files`、`Loading weights`）。
+      3. onnxruntime 的 C++ 层警告（`[W:onnxruntime...]`，标点模型加载时）。
+    另把 Python warnings 一并处理，安静模式下全部 ignore。
+    """
+    import logging
+
+    global _LOGGING_CONFIGURED, _VERBOSE
+    _LOGGING_CONFIGURED = True
+    _VERBOSE = verbose
+
+    if verbose:
+        # 调试：放行各库默认日志与进度条，Python warnings 也恢复默认
+        try:
+            from transformers.utils import logging as tlog
+
+            tlog.set_verbosity_warning()
+            tlog.enable_progress_bar()
+        except Exception:
+            pass
+        try:
+            import huggingface_hub.utils as hu
+
+            hu.enable_progress_bars()
+        except Exception:
+            pass
+        try:
+            import onnxruntime as ort
+
+            ort.set_default_logger_severity(2)  # 2=WARNING（默认）
+        except Exception:
+            pass
+        return
+
+    # 安静模式（默认）：压掉上述三类噪音
+    warnings.filterwarnings("ignore")
+    try:
+        from transformers.utils import logging as tlog
+
+        tlog.set_verbosity_error()
+        tlog.disable_progress_bar()
+    except Exception:
+        pass
+    try:
+        import huggingface_hub.utils as hu
+
+        hu.disable_progress_bars()
+    except Exception:
+        pass
+    try:
+        import onnxruntime as ort
+
+        ort.set_default_logger_severity(3)  # 3=ERROR，压掉 [W:onnxruntime...] 警告
+    except Exception:
+        pass
+    # transformers 内部也会经 py warnings 发一些，连同 logging 一起静音
+    logging.getLogger("transformers").setLevel(logging.ERROR)
 
 
 def require_cuda() -> str:
@@ -275,19 +343,22 @@ class Transcriber:
         from huggingface_hub import snapshot_download
         from transformers import pipeline
 
-        _silence_warnings()
+        # 日志噪音的开关由调用方（CLI 入口按 --verbose）统一设置；库被直接调用且
+        # 未设置时，这里兜底压一次安静模式，避免一屏 transformers/onnxruntime 日志。
+        if not _LOGGING_CONFIGURED:
+            configure_logging(verbose=False)
         if self.device is None:
             self.device = require_cuda()
         print(f"🤖 使用模型: {self.model_id}")
 
-        print("\n📥 检查/下载模型...")
+        print("\n📥 检查/下载模型中...")
         try:
             snapshot_download(repo_id=self.model_id, local_files_only=False)
             print("✅ 模型准备完成")
         except Exception as e:
             print(f"⚠️  模型下载警告（尝试使用本地缓存）: {e}")
 
-        print("\n🚀 加载模型...")
+        print("\n🚀 加载模型中...")
         self._pipe = pipeline(
             "automatic-speech-recognition",
             model=self.model_id,
@@ -363,6 +434,7 @@ class Transcriber:
         min_silence: float = 0.5,
         overlap: float = 2.0,
         fallback_db: float = -35.0,
+        bar: object | None = None,
     ) -> Iterator[list[Word]]:
         """按静音切分长音频，逐段转录并产出（已对齐全局时间轴的）词列表。
 
@@ -376,33 +448,49 @@ class Transcriber:
         fallback_db: 二次「宽松」静音阈值（应 > noise_db，越接近 0 越宽松）。当严格阈值
         noise_db 在某段 [target,max] 区间探不到静音、本会在 max_chunk 处硬切时，改用这批
         宽松候选找次优切点，把硬切降为真正的最后兜底。设为 <= noise_db 则关闭二次探测。
+
+        bar: 可选 tqdm 进度条实例。传入则日志走 tqdm.write()（自动让进度条钉在底部、
+        日志逐行上滚不冲突）、进度按已转录秒数推进（bar.total 设为音频总时长、每段
+        update 本段时长）；不传则退化为普通 print（向后兼容、便于无终端环境/测试）。
         """
+        # 日志分流：有进度条用 tqdm 的类方法 write()（自动避让进度条），否则普通 print
+        def _emit(msg: str) -> None:
+            if bar is not None:
+                type(bar).write(msg)
+            else:
+                print(msg)
+
         if self._pipe is None:
             self.load()
 
         duration = probe_duration(audio_file)
-        print(f"\n🎵 音频总时长: {duration:.1f}s（约 {duration / 60:.1f} 分钟）")
+        if bar is not None:
+            # 探到总时长后才能确定进度条满量程：按音频秒数推进
+            bar.reset(total=duration)
+        _emit(f"🎵 音频总时长: {duration:.1f}s（约 {duration / 60:.1f} 分钟）")
 
         if duration <= max_chunk:
-            print("ℹ️  音频较短，整段转录。")
+            _emit("ℹ️  音频较短，整段转录。")
             words = self._transcribe_file(audio_file, language, beams)
             if words:
                 yield words
+            if bar is not None:
+                bar.update(duration - bar.n)  # 推到满
             return
 
-        print(f"🔍 探测静音区间（noise={noise_db}dB, d={min_silence}s）...")
+        _emit(f"🔍 探测静音区间（noise={noise_db}dB, d={min_silence}s）...")
         silences = detect_silences(audio_file, noise_db, min_silence)
-        print(f"  找到 {len(silences)} 段静音")
+        _emit(f"  找到 {len(silences)} 段静音")
         # 宽松阈值二次探测（仅当 fallback_db 比严格阈值更宽松时才跑），给硬切段兜次优切点
         fallback_silences: list[tuple[float, float]] | None = None
         if fallback_db > noise_db:
-            print(f"🔍 二次宽松探测（noise={fallback_db}dB, d={min_silence}s）...")
+            _emit(f"🔍 二次宽松探测（noise={fallback_db}dB, d={min_silence}s）...")
             fallback_silences = detect_silences(audio_file, fallback_db, min_silence)
-            print(f"  找到 {len(fallback_silences)} 段（宽松）")
+            _emit(f"  找到 {len(fallback_silences)} 段（宽松）\n")
         segments = plan_segments(
             duration, silences, target_chunk, max_chunk, fallback_silences
         )
-        print(f"✂️  规划为 {len(segments)} 段，开始分段转录（重叠垫料 {overlap:.1f}s）\n")
+        _emit(f"✂️  规划为 {len(segments)} 段，开始分段转录（重叠区域 {overlap:.1f}s）")
 
         total = len(segments)
         with tempfile.TemporaryDirectory(prefix="kits_seg_") as tmp:
@@ -411,15 +499,22 @@ class Transcriber:
                 # 取数窗口在逻辑区间两侧外扩 overlap（夹在 [0, duration] 内），转录后再裁回
                 win_start = max(0.0, start - overlap)
                 win_end = min(duration, end + overlap)
-                print(
-                    f"🎤 转录第 {i}/{total} 段 "
-                    f"[{start:.1f}s -> {end:.1f}s, 时长 {end - start:.1f}s, "
-                    f"取数 {win_start:.1f}~{win_end:.1f}s]..."
-                )
+                # 段号收进进度条左侧描述（不刷屏）；详细边界仅 verbose 时打，平时是噪音
+                if bar is not None:
+                    bar.set_description(f"🎬 第 {i}/{total} 段")
+                if _VERBOSE or bar is None:
+                    _emit(
+                        f"🎤 转录第 {i}/{total} 段 "
+                        f"[{start:.1f}s -> {end:.1f}s, 时长 {end - start:.1f}s, "
+                        f"取数 {win_start:.1f}~{win_end:.1f}s]..."
+                    )
                 seg_path = tmp_dir / f"seg_{i:04d}.wav"
                 slice_audio(audio_file, win_start, win_end, seg_path)
                 words = self._transcribe_file(str(seg_path), language, beams)
                 seg_path.unlink(missing_ok=True)
+                # 进度按音频时长推进：本段转完即已覆盖到 end 秒
+                if bar is not None:
+                    bar.update(end - bar.n)
                 if not words:
                     continue
                 # 词级时间戳先加回窗口起始偏移，对齐全局时间轴
@@ -430,4 +525,4 @@ class Transcriber:
                 words = _keep_core_words(words, lo, hi)
                 if words:
                     yield words
-        print("\n✅ 全部分段转录完成！")
+        _emit("✅ 全部分段转录完成！")
