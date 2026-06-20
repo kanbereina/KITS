@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kits.transcriber import (
     _keep_core_words,
     _longest_silence_midpoint,
@@ -16,8 +18,13 @@ from kits.transcriber import (
 )
 
 
+@pytest.mark.requires_torch
 class TestSelectDevice:
-    """select_device 的设备优先级：CUDA > MPS > 抛错。monkeypatch torch 探测，不碰真硬件。"""
+    """select_device 的设备优先级：CUDA > MPS > 抛错。monkeypatch torch 探测，不碰真硬件。
+
+    虽不碰真 GPU，但 select_device 内部 import torch、且这里 monkeypatch torch 的探测函数，
+    故需 torch 已安装——标记 requires_torch，仅在重依赖测试 job 运行（轻量 CI job 不装 torch）。
+    """
 
     def _patch(self, monkeypatch, *, cuda: bool, mps: bool):
         import torch
@@ -37,8 +44,6 @@ class TestSelectDevice:
         assert select_device() == "mps"
 
     def test_raises_without_gpu(self, monkeypatch):
-        import pytest
-
         self._patch(monkeypatch, cuda=False, mps=False)
         with pytest.raises(RuntimeError, match="CUDA|MPS"):
             select_device()
