@@ -31,7 +31,8 @@ jobs:
       # pydantic + tqdm（进度条，纯 Python 轻量包）。故 CI 不跑 `uv sync`（会从自定义索引拉数
       # GB 的 CUDA 版 torch、既慢又脆），改用 --no-project + --with 只装跑测试/lint 所需的轻量依赖。
       # 注意：若今后给重依赖模块（transcriber/separator/punctuator）补需真实加载这些库的测试，
-      # 那部分测试需要 GPU runner，应另设 job，不要塞进这个轻量 job。
+      # 那部分测试请标记 @pytest.mark.requires_torch，并在 GPU runner 的独立 job 跑；
+      # 当前轻量 job 通过 -m "not requires_torch" 自动排除这类测试。
       - name: Ruff lint
         run: uv run --no-project --with "ruff>=0.15.17" ruff check .
 
@@ -41,4 +42,4 @@ jobs:
         run: >-
           uv run --no-project
           --with "pytest>=9.0.3" --with httpx --with pydantic --with tqdm
-          python -m pytest -q
+          python -m pytest -q -m "not requires_torch"
