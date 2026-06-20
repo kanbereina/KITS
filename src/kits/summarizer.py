@@ -82,6 +82,7 @@ class PromptsConfig(BaseModel):
             raise SummarizeError(
                 f"不支持的总结预设: {chosen!r}。当前可用: {', '.join(sorted(self.presets))}"
             )
+        # noinspection PyTypeChecker
         return chosen, self.presets[chosen].system
 
     @property

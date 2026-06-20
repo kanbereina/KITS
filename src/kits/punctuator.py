@@ -77,6 +77,7 @@ class Punctuator:
         idx_to_infer = [i for i, w in enumerate(words) if self._needs_punctuation(w["text"])]
         if idx_to_infer:
             batch = [words[i]["text"] for i in idx_to_infer]
+            # noinspection PyUnresolvedReferences
             results = self._model.infer(batch)
             punctuated: dict[int, str] = {}
             for i, res in zip(idx_to_infer, results):

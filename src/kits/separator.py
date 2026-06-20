@@ -50,6 +50,7 @@ def _expose_torch_cuda_dlls() -> None:
         import torch
     except ImportError:
         return
+    # noinspection PyTypeChecker
     torch_lib = Path(torch.__file__).parent / "lib"
     if torch_lib.is_dir():
         os.add_dll_directory(str(torch_lib))
@@ -354,9 +355,11 @@ class VocalSeparator:
         work_str = str(work_dir)
         self._sep.output_dir = work_str
         if getattr(self._sep, "model_instance", None) is not None:
+            # noinspection PyUnresolvedReferences
             self._sep.model_instance.output_dir = work_str
 
         print(f"🎤 正在分离人声: {in_path.name}")
+        # noinspection PyUnresolvedReferences
         outputs = self._sep.separate(str(in_path))
         if not outputs:
             raise SeparationError(f"人声分离未产出任何文件: {in_path.name}")
