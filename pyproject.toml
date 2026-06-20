@@ -52,6 +52,11 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 
+[tool.pytest.ini_options]
+markers = [
+    "requires_torch: 依赖 torch/CUDA 的测试，仅在重依赖测试 job 运行",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
