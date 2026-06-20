@@ -576,7 +576,7 @@ wheels = [
 
 [[package]]
 name = "kits"
-version = "1.5.2"
+version = "1.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "audio-separator", extra = ["gpu"] },
@@ -586,6 +586,7 @@ dependencies = [
     { name = "punctuators" },
     { name = "pydantic" },
     { name = "torch" },
+    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -604,6 +605,7 @@ requires-dist = [
     { name = "punctuators", specifier = ">=0.0.7" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "torch", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "tqdm", specifier = ">=4.66.0" },
     { name = "transformers", specifier = ">=5.12.0" },
 ]
 

@@ -38,18 +38,15 @@ from kits.subtitle import (
 )
 
 
-def _print_progress(done: int, total: int, prefix: str = "进度", width: int = 30) -> None:
-    """单行刷新的文本进度条。无第三方依赖，兼容 Windows 终端。
+def _make_bar(total: float | None, desc: str, unit: str = "it"):
+    """创建统一风格的 tqdm 进度条。
 
-    用 \\r 回到行首覆盖上一次输出，故同一行原地更新而非逐行刷屏。
+    用 tqdm：进度条自动钉在终端底部，配合 tqdm.write() 打印日志时日志逐行上滚、
+    进度条不被冲乱。total=None 时先建空条，待已知量程再 reset(total=...)。
     """
-    if total <= 0:
-        return
-    ratio = min(done / total, 1.0)
-    filled = int(width * ratio)
-    bar = "█" * filled + "░" * (width - filled)
-    sys.stdout.write(f"\r{prefix} |{bar}| {ratio * 100:5.1f}% ({done}/{total})")
-    sys.stdout.flush()
+    from tqdm import tqdm
+
+    return tqdm(total=total, desc=desc, unit=unit, dynamic_ncols=True, leave=True)
 
 
 def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
@@ -156,10 +153,23 @@ def build_parser() -> argparse.ArgumentParser:
         prog="kits",
         description="鹿乃 Twitch 直播工具：下载直播、生成 SRT 字幕",
     )
+    # 全局 --verbose：默认安静（压掉 transformers / onnxruntime / hf_hub 的刷屏日志与
+    # 进度条），加 --verbose 放行全部底层日志便于开发调试。用共享 parent 让每个子命令
+    # 都带上（可写在子命令末尾，如 kits subtitle -i x --verbose）。
+    verbose_parent = argparse.ArgumentParser(add_help=False)
+    verbose_parent.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="显示底层库(transformers/onnxruntime 等)的调试日志，默认隐藏",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # --- download 子命令 ---
-    dl = sub.add_parser("download", aliases=["dl"], help="下载 Twitch 直播并合并为 MP4")
+    dl = sub.add_parser(
+        "download", aliases=["dl"], parents=[verbose_parent],
+        help="下载 Twitch 直播并合并为 MP4",
+    )
     dl.add_argument("url", help="TS 文件示例 URL，形如 https://.../chunked/1710.ts")
     dl.add_argument("-o", "--output", default="output", help="输出文件名(不含扩展名)")
     dl.add_argument("--dir", default="downloads", help="下载目录")
@@ -173,14 +183,20 @@ def build_parser() -> argparse.ArgumentParser:
     dl.set_defaults(func=_run_download)
 
     # --- subtitle 子命令 ---
-    st = sub.add_parser("subtitle", aliases=["srt"], help="把已有音频转成 SRT 字幕")
+    st = sub.add_parser(
+        "subtitle", aliases=["srt"], parents=[verbose_parent],
+        help="把已有音频转成 SRT 字幕",
+    )
     st.add_argument("-i", "--input", required=True, help="输入音频文件(必填)")
     st.add_argument("-o", "--output", default="subtitle.srt", help="输出 SRT 文件")
     _add_subtitle_args(st)
     st.set_defaults(func=_run_subtitle)
 
     # --- translate 子命令 ---
-    tr = sub.add_parser("translate", aliases=["tr"], help="把日语 SRT 翻译成中文 SRT(DeepSeek)")
+    tr = sub.add_parser(
+        "translate", aliases=["tr"], parents=[verbose_parent],
+        help="把日语 SRT 翻译成中文 SRT(DeepSeek)",
+    )
     tr.add_argument("-i", "--input", required=True, help="输入 SRT 字幕文件(必填)")
     tr.add_argument("-o", "--output", default=None, help="输出 SRT(默认在原名后加 .zh)")
     tr.add_argument("--api-key", default=None, help="DeepSeek API Key(默认读环境变量 DEEPSEEK_API_KEY)")
@@ -189,7 +205,10 @@ def build_parser() -> argparse.ArgumentParser:
     tr.set_defaults(func=_run_translate)
 
     # --- separate 子命令 ---
-    sp = sub.add_parser("separate", aliases=["sep"], help="从音频分离出人声(audio-separator)")
+    sp = sub.add_parser(
+        "separate", aliases=["sep"], parents=[verbose_parent],
+        help="从音频分离出人声(audio-separator)",
+    )
     sp.add_argument("-i", "--input", required=True, help="输入音频文件(必填)")
     sp.add_argument(
         "-o", "--output", default=None,
@@ -226,7 +245,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=_run_separate)
 
     # --- summarize 子命令 ---
-    sm = sub.add_parser("summarize", aliases=["sum"], help="对已有 SRT 字幕用 AI 总结(DeepSeek)")
+    sm = sub.add_parser(
+        "summarize", aliases=["sum"], parents=[verbose_parent],
+        help="对已有 SRT 字幕用 AI 总结(DeepSeek)",
+    )
     sm.add_argument("-i", "--input", required=True, help="输入 SRT 字幕文件(必填)")
     sm.add_argument("-o", "--output", default=None, help="输出总结文件(默认在原名后加 .summary.md)")
     sm.add_argument("--api-key", default=None, help="DeepSeek API Key(默认读环境变量 DEEPSEEK_API_KEY)")
@@ -314,10 +336,18 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
         punctuator = Punctuator(**kwargs)
 
     print("\n" + "=" * 60)
-    print("🎬 分段转录 + 生成 SRT 字幕")
+    print("🎬 ASR 字幕生成")
     print("=" * 60)
 
-    with SrtWriter(output_srt) as writer:
+    # 模型提前加载，让其（含 transformers）加载日志在进度条启动前打完，避免冲乱进度条。
+    transcriber.load()
+    if punctuator is not None:
+        punctuator.load()
+
+    # 进度条按音频秒数推进：先建空条（量程未知），transcribe_segmented 探到总时长后
+    # 会 reset(total=duration)。段号/累计条数收进进度条 desc/postfix，不再刷屏。
+    bar = _make_bar(total=None, desc="🎬 转录进度", unit="s")
+    with SrtWriter(output_srt) as writer, bar:
         segments_words = transcriber.transcribe_segmented(
             audio_file,
             language=args.language,
@@ -328,6 +358,7 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
             min_silence=args.min_silence,
             overlap=args.segment_overlap,
             fallback_db=args.fallback_db,
+            bar=bar,
         )
         for words in segments_words:
             # 转录后、断句前补标点（时间戳不变），让 segment_sentences 能在句末标点处断句
@@ -347,7 +378,9 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
                 filtered_total += removed
             total = writer.append(sentences)
             all_sentences.extend(sentences)
-            print(f"  ✍️  已写入 {len(sentences)} 条，累计 {total} 条 -> {output_srt}")
+            # 累计条数收进进度条右侧（postfix），与 transcriber 设的段号描述（desc）互不覆盖，
+            # 不再每段刷一行。需要逐段明细时加 --verbose（底层日志一并放行）。
+            bar.set_postfix_str(f"累计 {total} 条")
 
     if callouts is not None:
         print(f"  🧹 已过滤游戏播报 {filtered_total} 条")
@@ -399,9 +432,6 @@ def _run_download(args: argparse.Namespace) -> None:
 
 
 def _run_subtitle(args: argparse.Namespace) -> None:
-    print("=" * 60)
-    print("🎤 Whisper 语音识别 + SRT 字幕生成")
-    print("=" * 60)
     _audio_to_srt(args.input, args.output, args)
     print("\n💡 提示: 可以直接将 SRT 文件拖入播放器或视频编辑软件使用")
 
@@ -434,16 +464,16 @@ def _run_translate(args: argparse.Namespace) -> None:
     )
 
     # 边翻译边写盘：批次严格串行（无并发），故产出顺序即字幕顺序，可安全增量写。
-    # 中途中断时已写入部分仍是合法 SRT。进度用单行刷新的进度条展示。
+    # 中途中断时已写入部分仍是合法 SRT。进度用 tqdm 进度条展示（按已译条数推进）。
     total = len(sentences)
     preview: list[Sentence] = []
-    with SrtWriter(str(output_path)) as writer:
+    bar = _make_bar(total=total, desc="🌐 翻译进度", unit="条")
+    with SrtWriter(str(output_path)) as writer, bar:
         for batch_result, done, _total in translator.translate_iter(sentences):
             writer.append(batch_result)
             if len(preview) < 10:
                 preview.extend(batch_result[: 10 - len(preview)])
-            _print_progress(done, total, prefix="🌐 翻译进度")
-    print()  # 进度条结束后换行
+            bar.update(done - bar.n)  # done 是累计已译条数，tqdm 收增量
 
     print(f"\n✅ 中文字幕已保存到: {output_path}（共 {total} 条）")
     print("\n📝 预览前10条:")
@@ -534,6 +564,11 @@ def main(argv: list[str] | None = None) -> None:
             reconfigure(encoding="utf-8", errors="replace")
 
     args = build_parser().parse_args(argv)
+    # 按 --verbose 统一设置底层库日志噪音（默认安静）。transcriber 顶层无重依赖，
+    # 仅导入此函数不会拉起 torch。
+    from kits.transcriber import configure_logging
+
+    configure_logging(verbose=getattr(args, "verbose", False))
     # 各子命令用 set_defaults(func=...) 绑定处理函数，别名与规范名都能正确分发
     args.func(args)
 
