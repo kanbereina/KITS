@@ -6,13 +6,47 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kits.transcriber import (
     _keep_core_words,
     _longest_silence_midpoint,
     _shift_words,
     _word_center,
     plan_segments,
+    select_device,
 )
+
+
+@pytest.mark.requires_torch
+class TestSelectDevice:
+    """select_device 的设备优先级：CUDA > MPS > 抛错。monkeypatch torch 探测，不碰真硬件。
+
+    虽不碰真 GPU，但 select_device 内部 import torch、且这里 monkeypatch torch 的探测函数，
+    故需 torch 已安装——标记 requires_torch，仅在重依赖测试 job 运行（轻量 CI job 不装 torch）。
+    """
+
+    def _patch(self, monkeypatch, *, cuda: bool, mps: bool):
+        import torch
+
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+        # torch.version.cuda / device 信息仅在 cuda 分支打印，给桩值避免报错
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 1, raising=False)
+        monkeypatch.setattr(torch.cuda, "get_device_name", lambda i=0: "stub-gpu", raising=False)
+        monkeypatch.setattr(torch.backends.mps, "is_available", lambda: mps)
+
+    def test_prefers_cuda(self, monkeypatch):
+        self._patch(monkeypatch, cuda=True, mps=True)
+        assert select_device() == "cuda"
+
+    def test_falls_back_to_mps(self, monkeypatch):
+        self._patch(monkeypatch, cuda=False, mps=True)
+        assert select_device() == "mps"
+
+    def test_raises_without_gpu(self, monkeypatch):
+        self._patch(monkeypatch, cuda=False, mps=False)
+        with pytest.raises(RuntimeError, match="CUDA|MPS"):
+            select_device()
 
 
 class TestPlanSegments:

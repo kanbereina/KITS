@@ -45,7 +45,7 @@ _鹿乃 Twitch 直播智能总结_
 - **句子完整不截断** — 长音频按静音切分、分段流式转写，切点落在无人说话处，边转边落盘，精度与整段转写一致。
 - **唱歌场次友好** — 内置 audio-separator 人声分离，长音频自动切段防爆内存、输出比特率对齐原音频，去掉 BGM / 伴奏再识别。
 - **省心的中文化** — DeepSeek 逐条翻译保留时间轴，并能按时间线 / 概述 / 高光 / 歌单等预设一键总结整场直播。
-- **专为 50 系显卡调优** — PyTorch 走 `pytorch-cu128`（CUDA 12.8），onnxruntime 复用 torch 自带 CUDA 运行时，开箱即用 GPU 加速。
+- **专为 50 系显卡调优，兼顾 Apple Silicon** — Nvidia 走 `pytorch-cu128`（CUDA 12.8），onnxruntime 复用 torch 自带 CUDA 运行时，开箱即用 GPU 加速；macOS（M 系列）自动切到 MPS 加速栈。
 
 ## 功能特性
 
@@ -71,7 +71,7 @@ _鹿乃 Twitch 直播智能总结_
 
 - [uv](https://docs.astral.sh/uv/)（包管理 + 运行器）— 装好后 `uv --version` 应有输出
 - [ffmpeg](https://ffmpeg.org/download.html) — 须在 PATH 中，`ffmpeg -version` 应有输出（合并 MP4 / 提取 MP3 / 音频切分都依赖它）
-- Nvidia 显卡驱动 — 转字幕、分离人声需要，`nvidia-smi` 应能看到显卡
+- GPU — 转字幕、分离人声需要。Nvidia 显卡（`nvidia-smi` 应能看到显卡）或 Apple Silicon（M 系列芯片，走 MPS 加速）二选一
 
 **2. 克隆并同步依赖**
 
@@ -81,13 +81,17 @@ cd KITS
 uv sync              # 创建虚拟环境并装齐所有依赖（含 dev 组）
 ```
 
-`uv sync` 会自动从 `pytorch-cu128` 源装好 CUDA 12.8 版 PyTorch，以及 audio-separator（含 onnxruntime-gpu）、punctuators 等。无需手动装 CUDA Toolkit——onnxruntime 复用 torch 自带的 CUDA 运行时。
+`uv sync` 会按平台自动选对依赖：
+
+- **Linux / Windows（Nvidia）** — 从 `pytorch-cu128` 源装 CUDA 12.8 版 PyTorch，以及 audio-separator（含 onnxruntime-gpu）、punctuators 等。无需手动装 CUDA Toolkit——onnxruntime 复用 torch 自带的 CUDA 运行时。
+- **macOS（Apple Silicon）** — 无 CUDA 轮子，自动从 PyPI 默认源装自带 MPS 的 PyTorch，配 CPU/CoreML 版 onnxruntime 与 `audio-separator[cpu]`。转录走 MPS 加速；人声分离可用但比 Nvidia 慢。
 
 **3. 验证安装**
 
 ```bash
 uv run kits --help          # 看到子命令说明即安装成功
-uv run python -c "import torch; print('CUDA:', torch.cuda.is_available())"  # 应输出 CUDA: True
+# Nvidia 应输出 CUDA: True；Apple Silicon 应输出 MPS: True
+uv run python -c "import torch; print('CUDA:', torch.cuda.is_available(), '| MPS:', torch.backends.mps.is_available())"
 ```
 
 **4.（可选）配置 DeepSeek**
@@ -105,8 +109,8 @@ export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY
 | 项 | 要求 | 说明 |
 | --- | --- | --- |
 | Python | 3.12 ~ 3.14 | 由 uv 管理虚拟环境 |
-| GPU | 支持 CUDA 的 Nvidia 显卡 | 转字幕 / 分离人声强制要求；仅下载不需要 |
-| CUDA | 12.8 | PyTorch 从 `pytorch-cu128` 源安装，勿换 PyPI 默认源 |
+| GPU | 支持 CUDA 的 Nvidia 显卡，或 Apple Silicon（M 系列） | 转字幕 / 分离人声强制要求；仅下载不需要 |
+| CUDA | 12.8（仅 Nvidia） | Linux/Win 的 PyTorch 从 `pytorch-cu128` 源安装，勿换 PyPI 默认源；macOS 不需要 |
 | ffmpeg | 在 PATH 中 | 合并 MP4、提取 MP3、音频切分 |
 | API Key | DeepSeek（可选） | 仅 `translate` / `summarize` 需要 |
 
@@ -300,7 +304,7 @@ uv run kits separate -i live.mp3 -o vocals.mp3
 uv run kits separate -i live.mp3 -o vocals.wav --model Kim_Vocal_2.onnx
 ```
 
-首次运行会自动下载分离模型。需要 CUDA GPU 与 `audio-separator[gpu]`（已在依赖中，`uv sync` 即装）。
+首次运行会自动下载分离模型。Nvidia 用 CUDA GPU + `audio-separator[gpu]`，macOS(Apple Silicon) 用 `audio-separator[cpu]`（CPU/CoreML，较慢）；均已在依赖中按平台分流，`uv sync` 即装。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -438,8 +442,8 @@ main.py            # 薄入口，委托给 kits.cli
 
 ## 常见问题
 
-**报错 `请安装 GPU 版本的 CUDA！`**
-程序检测不到可用的 CUDA 设备。请确认显卡驱动、CUDA 已正确安装，且 PyTorch 是 GPU 版本。
+**报错 `未检测到可用 GPU：需要 CUDA(Nvidia) 或 MPS(Apple Silicon) 设备！`**
+程序检测不到可用 GPU。Nvidia 用户请确认显卡驱动、CUDA 已正确安装且 PyTorch 是 GPU 版本（`torch.cuda.is_available()` 应为 True）；Apple Silicon 用户请确认 `torch.backends.mps.is_available()` 为 True。纯 CPU 环境不支持转录（太慢）。
 
 **模型下载失败**
 检查网络连接（需要访问 Hugging Face）。如已有本地缓存，下载失败时会自动回退到缓存。
