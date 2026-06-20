@@ -96,11 +96,26 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-def _flush(words: list[Word], max_duration: float | None = None) -> Sentence | None:
+def _flush(
+    words: list[Word],
+    max_duration: float | None = None,
+    max_seconds_per_char: float | None = None,
+    min_duration: float = 0.5,
+) -> Sentence | None:
     """把单词缓冲区合并成一条字幕（一个句子）。
 
     max_duration 非 None 时，对超过该时长的句子做硬钳制（end = start + max_duration），
     兜底那些词级时间戳缺失、导致前面断句规则失效而拉得过长的句子。
+
+    max_seconds_per_char 非 None 时，再按「每字符最多 N 秒」做二级收缩：kotoba 等蒸馏
+    模型的 chunk 时间戳常虚高（十来个字的短句标成十几秒），即便句末标点断句正确、
+    max_duration 钳到 15s，时长仍远超合理朗读时长。按字符数估算上限、超出则收缩 end。
+    只缩短显示时长，不改文本与起点，故不会与下一条重叠；反而能消除「虚高 end 盖过
+    下一条 start」造成的时间倒退。日语正常语速 ≥2 字/秒（每字 ≤0.5s），取 0.5 偏宽松、
+    只砍明显虚高者，不误伤慢语速。
+
+    min_duration：显示时长下界。kotoba 偶尔把短 chunk 的 start/end 挤在一点（如 0.04s），
+    收缩后更易触发；过短字幕在播放器里一闪而过甚至不显示。最后兜底撑到该值，保证可读。
     """
     if not words:
         return None
@@ -115,6 +130,13 @@ def _flush(words: list[Word], max_duration: float | None = None) -> Sentence | N
         end = start + 0.5
     if max_duration is not None and (end - start) > max_duration:
         end = start + max_duration
+    if max_seconds_per_char is not None:
+        char_limit = len(text) * max_seconds_per_char
+        if (end - start) > char_limit:
+            end = start + char_limit
+    # 最后兜底下界：经上面各步收缩后仍可能过短（原始时间戳就挤在一点），撑到 min_duration
+    if (end - start) < min_duration:
+        end = start + min_duration
     return {"start": start, "end": end, "text": text}
 
 
@@ -176,6 +198,7 @@ def segment_sentences(
     max_gap: float = 0.7,
     max_chars: int = 60,
     max_duration: float = 15.0,
+    max_seconds_per_char: float = 0.5,
 ) -> list[Sentence]:
     """把单词级时间戳切分成完整句子。
 
@@ -184,7 +207,12 @@ def segment_sentences(
          把含内部标点的 chunk 拆开，使句中的 。？！ 也能触发断句）
       2. 与上一个单词的停顿(无声)超过 max_gap
       3. 超过字符上限 max_chars / 时长上限 max_duration（防止句子失控变长）
+
+    max_seconds_per_char：每条字幕按「字符数 × 该值」估算朗读时长上限，超出则收缩 end。
+    治 kotoba chunk 时间戳虚高（短句标成 max_duration）——这类条目句末标点断句正确、
+    文本也对，只是 end 虚高；按字符速率收缩还原合理时长。设 <=0 关闭该二级收缩。
     """
+    spc = max_seconds_per_char if max_seconds_per_char and max_seconds_per_char > 0 else None
     words = _split_internal_punctuation(words)
     sentences: list[Sentence] = []
     buf: list[Word] = []
@@ -200,7 +228,7 @@ def segment_sentences(
         if buf:
             prev_end = last_known_end
             if start is not None and prev_end is not None and (start - prev_end) > max_gap:
-                if (sent := _flush(buf, max_duration)) is not None:
+                if (sent := _flush(buf, max_duration, spc)) is not None:
                     sentences.append(sent)
                 buf = []
                 last_known_end = None
@@ -215,7 +243,7 @@ def segment_sentences(
 
         # 遇到句末标点，句子完结
         if joined.endswith(SENTENCE_ENDINGS):
-            if (sent := _flush(buf, max_duration)) is not None:
+            if (sent := _flush(buf, max_duration, spc)) is not None:
                 sentences.append(sent)
             buf = []
             last_known_end = None
@@ -236,7 +264,7 @@ def segment_sentences(
                 # 没有逗号可切：按词边界硬切，避免整段被 flush 成一条超长字幕
                 head = buf
                 tail = []
-            if (sent := _flush(head, max_duration)) is not None:
+            if (sent := _flush(head, max_duration, spc)) is not None:
                 sentences.append(sent)
             buf = tail
             # 重算尾部的时间戳基准
@@ -249,8 +277,25 @@ def segment_sentences(
                 None,
             )
 
-    if (sent := _flush(buf, max_duration)) is not None:
+    if (sent := _flush(buf, max_duration, spc)) is not None:
         sentences.append(sent)
+    return _clamp_overlaps(sentences)
+
+
+def _clamp_overlaps(sentences: list[Sentence]) -> list[Sentence]:
+    """把每条 end 夹到不超过下一条 start，消除相邻字幕的时间重叠。
+
+    重叠来源有二：min_duration 把近零时长条目撑长后越过了紧邻的下一条；分段转录
+    接缝处 overlap 垫料的边界效应。两者都表现为「前条 end 略大于后条 start」。
+    就地夹紧 end=min(end, 下一条 start)即可消除。仅缩短显示时长、不动文本与起点。
+
+    若后一条 start <= 本条 start（模型把两句标在同一时刻），夹紧会使本条零时长——
+    此时优先「不重叠」、容忍零时长，因为这种同刻并发本就无法既不重叠又非零时长。
+    """
+    for i in range(len(sentences) - 1):
+        nxt_start = sentences[i + 1]["start"]
+        if sentences[i]["end"] > nxt_start:
+            sentences[i]["end"] = max(sentences[i]["start"], nxt_start)
     return sentences
 
 
