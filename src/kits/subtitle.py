@@ -90,7 +90,7 @@ def clean_text(text: str) -> str:
     # 2~8 字的短语连续重复 3 次以上压成 2 次（抑制「はっはっはっ」「ここだここだ」式幻觉）
     text = re.sub(r"(.{2,8}?)\1{2,}", r"\1\1", text)
     # 去除乱码
-    text = re.sub(r"[�]", "", text)
+    text = re.sub(r"�", "", text)
     # 多个空白合并成一个
     text = re.sub(r"\s+", " ", text)
     return text.strip()
@@ -137,6 +137,7 @@ def _flush(
     # 最后兜底下界：经上面各步收缩后仍可能过短（原始时间戳就挤在一点），撑到 min_duration
     if (end - start) < min_duration:
         end = start + min_duration
+    # noinspection PyTypeChecker
     return {"start": start, "end": end, "text": text}
 
 
@@ -384,6 +385,7 @@ def parse_srt(content: str) -> list[Sentence]:
         text = "\n".join(lines[time_idx + 1 :]).strip()
         if not text:
             continue
+        # noinspection PyUnresolvedReferences
         sentences.append(
             {
                 "start": srt_time_to_seconds(match.group(1)),

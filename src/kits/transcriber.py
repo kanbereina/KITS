@@ -87,6 +87,7 @@ def configure_logging(verbose: bool = False) -> None:
 
     if verbose:
         # 调试：放行各库默认日志与进度条，Python warnings 也恢复默认
+        # noinspection PyBroadException
         try:
             from transformers.utils import logging as tlog
 
@@ -94,13 +95,16 @@ def configure_logging(verbose: bool = False) -> None:
             tlog.enable_progress_bar()
         except Exception:
             pass
+        # noinspection PyBroadException
         try:
             import huggingface_hub.utils as hu
 
             hu.enable_progress_bars()
         except Exception:
             pass
+        # noinspection PyBroadException
         try:
+            # noinspection PyPackageRequirements
             import onnxruntime as ort
 
             ort.set_default_logger_severity(2)  # 2=WARNING（默认）
@@ -110,6 +114,7 @@ def configure_logging(verbose: bool = False) -> None:
 
     # 安静模式（默认）：压掉上述三类噪音
     warnings.filterwarnings("ignore")
+    # noinspection PyBroadException
     try:
         from transformers.utils import logging as tlog
 
@@ -117,13 +122,16 @@ def configure_logging(verbose: bool = False) -> None:
         tlog.disable_progress_bar()
     except Exception:
         pass
+    # noinspection PyBroadException
     try:
         import huggingface_hub.utils as hu
 
         hu.disable_progress_bars()
     except Exception:
         pass
+    # noinspection PyBroadException
     try:
+        # noinspection PyPackageRequirements
         import onnxruntime as ort
 
         ort.set_default_logger_severity(3)  # 3=ERROR，压掉 [W:onnxruntime...] 警告
@@ -287,7 +295,9 @@ def _shift_words(words: list[Word], offset: float) -> list[Word]:
     shifted: list[Word] = []
     for w in words:
         ts = w.get("timestamp") or (None, None)
+        # noinspection PyUnresolvedReferences
         start = None if ts[0] is None else ts[0] + offset
+        # noinspection PyUnresolvedReferences
         end = None if ts[1] is None else ts[1] + offset
         shifted.append({"text": w["text"], "timestamp": (start, end)})
     return shifted
@@ -397,7 +407,7 @@ class Transcriber:
         """
         if self._pipe is None:
             self.load()
-        # noinspection PyTypeChecker
+        # noinspection PyTypeChecker,PyCallingNonCallable
         result: dict = self._pipe(
             audio_file,
             return_timestamps=True,
@@ -467,6 +477,7 @@ class Transcriber:
         # 日志分流：有进度条用 tqdm 的类方法 write()（自动避让进度条），否则普通 print
         def _emit(msg: str) -> None:
             if bar is not None:
+                # noinspection PyUnresolvedReferences
                 type(bar).write(msg)
             else:
                 print(msg)
@@ -477,6 +488,7 @@ class Transcriber:
         duration = probe_duration(audio_file)
         if bar is not None:
             # 探到总时长后才能确定进度条满量程：按音频秒数推进
+            # noinspection PyUnresolvedReferences
             bar.reset(total=duration)
         _emit(f"🎵 音频总时长: {duration:.1f}s（约 {duration / 60:.1f} 分钟）")
 
@@ -486,6 +498,7 @@ class Transcriber:
             if words:
                 yield words
             if bar is not None:
+                # noinspection PyUnresolvedReferences
                 bar.update(duration - bar.n)  # 推到满
             return
 
@@ -497,6 +510,7 @@ class Transcriber:
         if fallback_db > noise_db:
             _emit(f"🔍 二次宽松探测（noise={fallback_db}dB, d={min_silence}s）...")
             fallback_silences = detect_silences(audio_file, fallback_db, min_silence)
+            # noinspection PyTypeChecker
             _emit(f"  找到 {len(fallback_silences)} 段（宽松）\n")
         segments = plan_segments(
             duration, silences, target_chunk, max_chunk, fallback_silences
@@ -512,6 +526,7 @@ class Transcriber:
                 win_end = min(duration, end + overlap)
                 # 段号收进进度条左侧描述（不刷屏）；详细边界仅 verbose 时打，平时是噪音
                 if bar is not None:
+                    # noinspection PyUnresolvedReferences
                     bar.set_description(f"🎬 第 {i}/{total} 段")
                 if _VERBOSE or bar is None:
                     _emit(
@@ -525,6 +540,7 @@ class Transcriber:
                 seg_path.unlink(missing_ok=True)
                 # 进度按音频时长推进：本段转完即已覆盖到 end 秒
                 if bar is not None:
+                    # noinspection PyUnresolvedReferences
                     bar.update(end - bar.n)
                 if not words:
                     continue
