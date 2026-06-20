@@ -56,6 +56,7 @@ def parse_url_pattern(url: str) -> tuple[str, int, str]:
 
 def _check_ffmpeg() -> bool:
     """检查 ffmpeg 是否可用。"""
+    # noinspection PyDeprecation
     if shutil.which("ffmpeg") is None:
         return False
     result = subprocess.run(["ffmpeg", "-version"], capture_output=True, check=False)
@@ -71,7 +72,8 @@ class TwitchDownloader:
         self.max_concurrent = max_concurrent
         self.ts_dir.mkdir(parents=True, exist_ok=True)
 
-    async def _exists(self, client: httpx.AsyncClient, url: str) -> bool:
+    @staticmethod
+    async def _exists(client: httpx.AsyncClient, url: str) -> bool:
         try:
             resp = await client.head(url, timeout=5.0)
             return resp.status_code == 200
@@ -150,10 +152,10 @@ class TwitchDownloader:
         semaphore = asyncio.Semaphore(self.max_concurrent)
         downloaded: list[Path] = []
 
-        async def _limited(client: httpx.AsyncClient, num: int) -> Path | None:
+        async def _limited(_client: httpx.AsyncClient, num: int) -> Path | None:
             async with semaphore:
                 url = f"{base_url}{num}{extension}"
-                return await self._download_one(client, url, num - start)
+                return await self._download_one(_client, url, num - start)
 
         async with httpx.AsyncClient(headers=_HEADERS, timeout=30.0) as client:
             tasks = [_limited(client, num) for num in range(start, end + 1)]
@@ -260,6 +262,7 @@ class TwitchDownloader:
         if not ts_files:
             raise RuntimeError("未能下载任何 TS 文件")
 
+        # noinspection PyDictCreation
         outputs: dict[str, Path] = {}
         outputs["mp4"] = self.merge_to_mp4(ts_files, output_name)
         if extract_audio:
