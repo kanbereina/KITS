@@ -5,6 +5,7 @@ from __future__ import annotations
 from kits.subtitle import (
     SrtWriter,
     Word,
+    _clamp_overlaps,
     _split_internal_punctuation,
     clean_text,
     parse_srt,
@@ -237,6 +238,61 @@ class TestSegmentSentences:
             words, max_gap=1000.0, max_chars=10000, max_duration=15.0
         )
         assert len(result) >= 2
+
+    def test_shrinks_inflated_short_sentence_by_char_rate(self):
+        # kotoba 常把短句标成虚高时长：十几字短句却跨 14s。
+        # 句末标点断句正确、max_duration 也没超，但应按字符速率收缩 end。
+        text = "さくらぜサクラゼさん39か月。"
+        words = [_word(text, 266.0, 280.0)]
+        result = segment_sentences(words, max_seconds_per_char=0.5)
+        assert len(result) == 1
+        # 上限 = 字符数 * 0.5s，远小于原始 14s
+        assert result[0]["end"] - result[0]["start"] <= len(text) * 0.5 + 1e-6
+        assert result[0]["end"] - result[0]["start"] < 14.0  # 确实被收缩了
+        assert result[0]["start"] == 266.0  # 起点不动
+        assert result[0]["text"].endswith("。")  # 文本不动
+
+    def test_char_rate_disabled_when_zero(self):
+        # max_seconds_per_char<=0 时关闭二级收缩，时长仅受 max_duration 约束
+        words = [_word("短い。", 0.0, 14.0)]
+        result = segment_sentences(words, max_seconds_per_char=0.0, max_duration=15.0)
+        assert abs(result[0]["end"] - result[0]["start"] - 14.0) < 1e-6
+
+    def test_char_rate_keeps_normal_pace_sentences(self):
+        # 正常语速的句子（时长与字符匹配）不应被误缩
+        words = [_word("これはふつうのはやさです。", 0.0, 5.0)]  # 13 字 / 5s，约 0.38s/字
+        result = segment_sentences(words, max_seconds_per_char=0.5)
+        assert abs(result[0]["end"] - result[0]["start"] - 5.0) < 1e-6
+
+    def test_min_duration_floor_for_near_zero_chunk(self):
+        # kotoba 偶尔把短 chunk 的 start/end 挤在一点（end-start≈0.04s），
+        # 应兜底撑到最小显示时长（0.5s），避免播放器一闪而过/不显示。
+        words = [_word("レシテじゃん。", 17.48, 17.52)]
+        result = segment_sentences(words)
+        assert len(result) == 1
+        assert result[0]["end"] - result[0]["start"] >= 0.5 - 1e-6
+        assert result[0]["start"] == 17.48  # 起点不动
+
+    def test_no_overlap_after_min_duration_stretch(self):
+        # min_duration 撑长近零时长条目后，不得越过紧邻下一条的 start（消重叠）。
+        # 第一条 end≈start，撑到 +0.5 会到 17.98，但下一条 17.5 开始 → 应夹回 17.5。
+        words = [
+            _word("レシテじゃん。", 17.48, 17.50),
+            _word("つぎ。", 17.50, 21.0),
+        ]
+        result = segment_sentences(words)
+        assert len(result) == 2
+        assert result[0]["end"] <= result[1]["start"] + 1e-6  # 无重叠
+
+    def test_clamp_overlaps_collapses_seam_overlap(self):
+        # 接缝重叠：前条 end 大于后条 start，应夹到后条 start
+        sents = [
+            {"start": 509.0, "end": 513.5, "text": "前"},
+            {"start": 512.8, "end": 527.8, "text": "后"},
+        ]
+        out = _clamp_overlaps(sents)
+        assert out[0]["end"] == 512.8
+        assert out[1]["start"] == 512.8
 
 
 class TestSentencesToSrt:
