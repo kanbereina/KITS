@@ -108,11 +108,3 @@ class TestDefaults:
         c = LLMClient()
         assert c.model == DEFAULT_MODEL
         assert c.timeout == 120.0
-
-
-class TestBackwardCompatAliases:
-    def test_deepseek_aliases_are_same_objects(self):
-        from kits import deepseek
-
-        assert deepseek.DeepSeekClient is LLMClient
-        assert deepseek.DeepSeekError is LLMError

@@ -47,11 +47,10 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - `subtitle.py` — 纯函数库，**不依赖 torch/网络**，可独立单测。负责单词级时间戳 → 完整句子的断句、SRT 渲染、SRT 解析（`parse_srt` / `srt_time_to_seconds`），以及增量写入器 `SrtWriter`（分段转录时序号跨段连续、逐段 flush 落盘）。`Word` / `Sentence` 是贯穿全项目的 TypedDict 数据契约。
 - `filters.py` — 纯函数库，剔除游戏内系统播报 / 技能语音（整条完全匹配）。
 - `llm.py` — **公共 OpenAI 兼容 LLM 客户端** `LLMClient`，仅依赖 httpx。封装 base_url 解析（参数 > `KITS_LLM_BASE_URL` > 默认 DeepSeek，自动补 `/chat/completions`）、API Key 解析（参数 > `KITS_LLM_API_KEY` > `OPENAI_API_KEY` > `DEEPSEEK_API_KEY`）、`chat()` 单次请求、错误处理（`LLMError`）。空 Key 策略：默认 DeepSeek 端点强制要 Key，自定义端点允许空 Key（本地 Ollama 等）。`translator` 与 `summarizer` 共用，批处理 / map-reduce 等领域策略留各自模块。
-- `deepseek.py` — 向后兼容转发层，从 `llm.py` re-export 并保留 `DeepSeekClient` = `LLMClient`、`DeepSeekError` = `LLMError` 别名。新代码直接用 `kits.llm.LLMClient`。
 - `transcriber.py` — 封装 Whisper pipeline 的加载与转录。`transcribe()` 整段转；`transcribe_segmented()` 按静音切分长音频后分段流式产出（生成器）。依赖 torch/transformers，静音探测与切分依赖 ffmpeg/ffprobe。**时间戳粒度**：用 `return_timestamps=True`（chunk/短语级），不用 `"word"`——因 kotoba 等蒸馏模型解码器仅 2 层，但其 alignment_heads 继承自 large-v3（引用第 25 层），抽词级时间戳会 `IndexError`。chunk 结构同为 `{"text", "timestamp": (start, end)}`，兼容 `Word` 契约。
 - `punctuator.py` — `Punctuator`，给无标点的转录 chunk 批量补日语句读（。！？），**时间戳原样保留**。复用 kotoba 官方同款标点模型（punctuators 库 `PunctCapSegModelONNX`）。蒸馏模型 chunk 不带句末标点会使 `segment_sentences` 的标点断句失效，补标点后才能在 chunk 边界正常断句。重依赖 punctuators（ONNX），**延迟导入**。
 - `downloader.py` — `TwitchDownloader`，异步下载 TS 分片 → ffmpeg 合并 MP4 → 可选提取 MP3。仅依赖 httpx + ffmpeg，**不依赖 torch**。
-- `translator.py` — `DeepSeekTranslator`，经 `llm.LLMClient` 把日语句子逐批译成中文。`TranslationError` 继承 `LLMError`（即 `DeepSeekError`，保留历史契约）。
+- `translator.py` — `LLMTranslator`，经 `llm.LLMClient` 把日语句子逐批译成中文。`TranslationError` 继承 `LLMError`。
 - `separator.py` — `VocalSeparator`，封装 audio-separator 分离人声（默认只出 Vocals 轨）。重依赖 audio-separator（含 torch/onnxruntime），**延迟导入**（`load()` 内才 import）。底层统一产出**无损 WAV** 作中间产物，最终格式/比特率由 `_encode_final` 用 ffmpeg 一次性套用。长音频按 `segment_minutes`（默认 15）切段→逐段分离→ffmpeg concat 合并，避免一次性出整轨爆内存。比特率默认对齐原音频（探音频流比特率 → 向上取整到 2 的幂 kbps、夹 [32,320]、留 5% 容差吸收 MP3 标称偏差），`--output-bitrate` 可覆盖；无损格式忽略比特率。
 - `summarizer.py` — `Summarizer`，经 `llm.LLMClient` 对 SRT 做 AI 总结。提示词走 JSON 预设（包内 `prompts.json` + 用户 `--prompt-file` 覆盖），长字幕 map-reduce 分块。纯逻辑（`load_presets` / `resolve_preset` / `format_sentences` / `chunk_sentences`）不触网、可单测。
 - `data/prompts.json` — 内置总结提示词预设（timeline / summary / highlights / setlist）+ `reduce_system` 合并提示词，随包发布（置于 `data/` 子目录与 .py 源码分离）。
@@ -67,7 +66,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 关键约定：
 
 - `cli.py` 中对 `transcriber` / `downloader` / `translator` / `separator` / `summarizer` / `punctuator` 用**延迟导入**（函数内 import），避免无谓加载 GPU 栈或网络栈。新增重依赖模块时沿用此模式。
-- LLM 调用统一走 `llm.LLMClient`（OpenAI 兼容，默认 DeepSeek；`deepseek.DeepSeekClient` 为向后兼容别名），不要在 `translator` / `summarizer` 里重复写 HTTP / 鉴权。新增 LLM 能力时复用该客户端，领域逻辑（分批、提示词）留各自模块。
+- LLM 调用统一走 `llm.LLMClient`（OpenAI 兼容，默认 DeepSeek），不要在 `translator` / `summarizer` 里重复写 HTTP / 鉴权。新增 LLM 能力时复用该客户端，领域逻辑（分批、提示词）留各自模块。
 - `download --srt` 隐含 `--mp3`（生成字幕必须先有音频），逻辑在 `_run_download` 的 `need_mp3 = args.mp3 or args.srt`。
 - 断句与分段参数（`--max-gap` / `--target-chunk` 等）由 `_add_subtitle_args` 在 download / subtitle 间共用。
 - TS URL 里的分片编号**仅用于定位 base_url**，下载范围默认从 0 开始、用指数探测+二分定位结尾（`detect_end_number`）。

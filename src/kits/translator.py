@@ -14,9 +14,9 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""字幕翻译：调用 DeepSeek API 把日语 SRT 翻译成中文 SRT。
+"""字幕翻译：调用 OpenAI 兼容 LLM 把日语 SRT 翻译成中文 SRT。
 
-仅依赖 httpx（经由 kits.deepseek 公共客户端），不引入 torch / transformers。
+仅依赖 httpx（经由 kits.llm 公共客户端），不引入 torch / transformers。
 消费 kits.subtitle 解析出的句子列表，逐批翻译后保持时间戳不变写回 SRT。
 """
 
@@ -29,7 +29,7 @@ import httpx
 from kits.llm import DEFAULT_MODEL, LLMClient, LLMError
 from kits.subtitle import Sentence
 
-__all__ = ["DeepSeekTranslator", "TranslationError"]
+__all__ = ["LLMTranslator", "TranslationError"]
 
 # 翻译系统提示：要求逐条对应、只输出译文、保持顺序与条数一致
 _SYSTEM_PROMPT = (
@@ -43,13 +43,11 @@ _SYSTEM_PROMPT = (
 )
 
 
-# 向后兼容：旧代码 / 测试可能仍 import TranslationError
-# LLMError 即 DeepSeekError（同一对象），故继承契约不破
 class TranslationError(LLMError):
     """翻译过程中的错误（API 失败、响应解析失败等）。"""
 
 
-class DeepSeekTranslator:
+class LLMTranslator:
     """字幕翻译器。按批调用 OpenAI 兼容公共客户端的 chat 接口。"""
 
     def __init__(

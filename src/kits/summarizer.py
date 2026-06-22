@@ -14,9 +14,9 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""字幕总结：调用 DeepSeek 把已有 SRT 字幕总结成可读的回顾文本。
+"""字幕总结：调用 OpenAI 兼容 LLM 把已有 SRT 字幕总结成可读的回顾文本。
 
-仅依赖 httpx（经由 kits.deepseek 公共客户端），不引入 torch / transformers。
+仅依赖 httpx（经由 kits.llm 公共客户端），不引入 torch / transformers。
 消费 kits.subtitle.parse_srt 产出的句子列表。
 
 提示词走 JSON 预设：包内置 prompts.json 提供多种预设（timeline / summary /
@@ -171,7 +171,7 @@ def chunk_sentences(
 
 
 class Summarizer:
-    """DeepSeek 字幕总结器。按预设提示词总结字幕，长字幕走 map-reduce。"""
+    """字幕总结器。按预设提示词总结字幕，长字幕走 map-reduce。"""
 
     def __init__(
         self,

@@ -34,7 +34,6 @@ from typing import Any
 import httpx
 
 __all__ = [
-    "DEEPSEEK_API_URL",
     "DEFAULT_BASE_URL",
     "DEFAULT_MODEL",
     "LLMClient",
@@ -43,8 +42,6 @@ __all__ = [
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
-# 兼容历史引用：完整的默认 endpoint（base + /chat/completions）
-DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 
 _CHAT_COMPLETIONS_PATH = "/chat/completions"
 

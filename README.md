@@ -433,7 +433,7 @@ main.py            # 薄入口，委托给 kits.cli
 - `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；`transcribe_segmented()` 按静音切分长音频、分段流式产出
 - `punctuator.Punctuator.restore()` 给无标点的 chunk 补日语句读，时间戳不变（延迟导入重依赖）
 - `subtitle.segment_sentences()` 负责断句、`write_srt()` / `SrtWriter` 负责落盘（后者支持分段增量写）、`parse_srt()` 负责把 SRT 读回句子列表
-- `llm.LLMClient` 集中 OpenAI 兼容端点的鉴权与请求（默认 DeepSeek，可配 `--base-url`）；`translator.DeepSeekTranslator` 与 `summarizer.Summarizer` 复用它（`deepseek.DeepSeekClient` 为向后兼容别名）
+- `llm.LLMClient` 集中 OpenAI 兼容端点的鉴权与请求（默认 DeepSeek，可配 `--base-url`）；`translator.LLMTranslator` 与 `summarizer.Summarizer` 复用它
 - `separator.VocalSeparator.separate()` 用 audio-separator 分离人声（延迟导入重依赖）
 - `summarizer.Summarizer.summarize()` 按预设提示词总结字幕，长字幕分块再合并
 - `cli` 把它们串成流水线：`download --srt` 即「下载 -> 提取音频 -> 转字幕」，`subtitle --separate` 即「分离人声 -> 转字幕」
