@@ -283,8 +283,9 @@ uv run kits translate -i live.srt -o live_cn.srt --api-key sk-xxxx
 | --- | --- | --- |
 | `-i, --input` | （必填） | 输入 SRT 字幕文件路径 |
 | `-o, --output` | `原名.zh.srt` | 输出 SRT 文件路径 |
-| `--api-key` | 读环境变量 | DeepSeek API Key，缺省读 `DEEPSEEK_API_KEY` |
-| `--model` | `deepseek-chat` | DeepSeek 模型名 |
+| `--api-key` | 读环境变量 | LLM API Key，缺省读 `KITS_LLM_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` |
+| `--base-url` | DeepSeek | OpenAI 兼容端点 base_url，缺省读 `KITS_LLM_BASE_URL`，见下方「接入其他 OpenAI 兼容端点」 |
+| `--model` | `deepseek-chat` | LLM 模型名 |
 | `--batch-size` | `20` | 每批翻译的字幕条数 |
 
 > 翻译只替换文本、保留时间戳。字幕按批发送给模型逐条翻译，某条译文缺失时会回退保留原日语，避免时间轴错位。
@@ -352,13 +353,34 @@ uv run kits summarize -i live.srt --prompt-file my_prompts.json --preset mine
 | --- | --- | --- |
 | `-i, --input` | （必填） | 输入 SRT 字幕文件路径 |
 | `-o, --output` | `原名.summary.md` | 输出总结文件路径 |
-| `--api-key` | 读环境变量 | DeepSeek API Key，缺省读 `DEEPSEEK_API_KEY` |
-| `--model` | `deepseek-chat` | DeepSeek 模型名 |
+| `--api-key` | 读环境变量 | LLM API Key，缺省读 `KITS_LLM_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` |
+| `--base-url` | DeepSeek | OpenAI 兼容端点 base_url，缺省读 `KITS_LLM_BASE_URL`，见下方「接入其他 OpenAI 兼容端点」 |
+| `--model` | `deepseek-chat` | LLM 模型名 |
 | `--preset` | 配置 default | 总结预设名（`timeline` / `summary` / `highlights` / `setlist`） |
 | `--prompt-file` | 无 | 自定义提示词 JSON，覆盖内置预设 |
 | `--max-chars` | `8000` | 单块送审最大字符数，超长字幕按此分块 |
 
 > 自定义提示词 JSON 格式：顶层 `presets` 是「预设名 → {description, system}」字典，可选 `default`（默认预设名）和 `reduce_system`（多块合并时的提示词）。用户预设与内置预设浅合并，同名覆盖。
+
+### 接入其他 OpenAI 兼容端点
+
+`translate` / `summarize` 的大模型调用走 OpenAI 标准 `/chat/completions` 协议，默认指向 DeepSeek。通过 `--base-url`（或环境变量 `KITS_LLM_BASE_URL`）可接入任意 OpenAI 兼容端点，如 OpenAI 官方、本地 Ollama、vLLM、LM Studio 等：
+
+```bash
+# OpenAI 官方
+uv run kits summarize -i live.srt --base-url https://api.openai.com/v1 --model gpt-4o-mini --api-key sk-xxxx
+
+# 本地 Ollama（本地端点通常无需鉴权，可不传 --api-key）
+uv run kits summarize -i live.srt --base-url http://localhost:11434/v1 --model qwen2.5
+
+# 本地 vLLM
+uv run kits translate -i live.srt --base-url http://localhost:8000/v1 --model Qwen/Qwen2.5-7B-Instruct
+```
+
+base_url 只需给到 `/v1` 这层，工具会自动补 `/chat/completions`（若已带该路径则原样使用）。API Key 解析优先级：`--api-key` > `KITS_LLM_API_KEY` > `OPENAI_API_KEY` > `DEEPSEEK_API_KEY`；默认 DeepSeek 端点仍要求 Key，自定义端点允许空 Key。
+
+> ⚠️ 安全提示：`--base-url` 是你显式指定的外发端点，API Key 与字幕内容会发往该地址。接入第三方 / 远程端点前请确认其可信。
+
 
 ### 示例
 
@@ -411,7 +433,7 @@ main.py            # 薄入口，委托给 kits.cli
 - `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；`transcribe_segmented()` 按静音切分长音频、分段流式产出
 - `punctuator.Punctuator.restore()` 给无标点的 chunk 补日语句读，时间戳不变（延迟导入重依赖）
 - `subtitle.segment_sentences()` 负责断句、`write_srt()` / `SrtWriter` 负责落盘（后者支持分段增量写）、`parse_srt()` 负责把 SRT 读回句子列表
-- `deepseek.DeepSeekClient` 集中 DeepSeek 鉴权与请求；`translator.DeepSeekTranslator` 与 `summarizer.Summarizer` 复用它
+- `llm.LLMClient` 集中 OpenAI 兼容端点的鉴权与请求（默认 DeepSeek，可配 `--base-url`）；`translator.DeepSeekTranslator` 与 `summarizer.Summarizer` 复用它（`deepseek.DeepSeekClient` 为向后兼容别名）
 - `separator.VocalSeparator.separate()` 用 audio-separator 分离人声（延迟导入重依赖）
 - `summarizer.Summarizer.summarize()` 按预设提示词总结字幕，长字幕分块再合并
 - `cli` 把它们串成流水线：`download --srt` 即「下载 -> 提取音频 -> 转字幕」，`subtitle --separate` 即「分离人声 -> 转字幕」

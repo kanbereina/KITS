@@ -26,7 +26,7 @@ from collections.abc import Iterator
 
 import httpx
 
-from kits.deepseek import DEFAULT_MODEL, DeepSeekClient, DeepSeekError
+from kits.llm import DEFAULT_MODEL, LLMClient, LLMError
 from kits.subtitle import Sentence
 
 __all__ = ["DeepSeekTranslator", "TranslationError"]
@@ -44,12 +44,13 @@ _SYSTEM_PROMPT = (
 
 
 # 向后兼容：旧代码 / 测试可能仍 import TranslationError
-class TranslationError(DeepSeekError):
+# LLMError 即 DeepSeekError（同一对象），故继承契约不破
+class TranslationError(LLMError):
     """翻译过程中的错误（API 失败、响应解析失败等）。"""
 
 
 class DeepSeekTranslator:
-    """DeepSeek 字幕翻译器。按批调用公共客户端的 chat 接口。"""
+    """字幕翻译器。按批调用 OpenAI 兼容公共客户端的 chat 接口。"""
 
     def __init__(
         self,
@@ -57,10 +58,13 @@ class DeepSeekTranslator:
         model: str = DEFAULT_MODEL,
         batch_size: int = 20,
         timeout: float = 120.0,
+        base_url: str | None = None,
     ):
         try:
-            self._client = DeepSeekClient(api_key=api_key, model=model, timeout=timeout)
-        except DeepSeekError as e:
+            self._client = LLMClient(
+                api_key=api_key, model=model, base_url=base_url, timeout=timeout
+            )
+        except LLMError as e:
             # 保持对外抛 TranslationError 的历史契约
             raise TranslationError(str(e)) from e
         self.batch_size = batch_size

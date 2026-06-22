@@ -32,7 +32,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - **依赖按平台分流**（见 `pyproject.toml`）：Linux/Win 走 CUDA 栈（torch `pytorch-cu128` + `onnxruntime-gpu` + `audio-separator[gpu]`）；macOS(Apple Silicon) 无 CUDA 轮子，自动落到 PyPI 默认源 torch（自带 MPS）+ `onnxruntime`(CPU/CoreML) + `audio-separator[cpu]`。关键三处：torch 源用 `marker = "sys_platform != 'darwin'"` 仅对非 darwin 生效、`pytorch-cu128` 索引置 `explicit = true`（否则 torch 被绑死该索引、mac 不回落 PyPI）、`required-environments` 声明 darwin-arm64（强制 uv 为 mac 单独求解出有 arm64 轮子的 torch 版本，否则通用解析会把全平台锁到 `+cu128` 本地版导致 mac sync 失败）。`override-dependencies` 的 onnxruntime 禁装 marker 改为 `sys_platform == 'darwin'`：mac 上*需要* CPU 版、非 darwin 才禁（防 CPU 版顶掉 GPU 版 dll）。改依赖后 `uv lock` 会按平台分出两份 torch stanza。
 - 默认模型 `kotoba-tech/kotoba-whisper-v2.2`（日语识别更准的蒸馏模型）。它只产 chunk 级时间戳、不带句末标点，故转录后默认走 `punctuator` 标点恢复再断句（`--no-punctuate` 关闭）。换用本身带 word 级时间戳 + 标点的模型时可关。
 - 合并 MP4、提取 MP3 依赖系统 `ffmpeg`，须在 PATH 中。
-- `translate` / `sum` 需要 DeepSeek API Key，走 `--api-key` 或环境变量 `DEEPSEEK_API_KEY`。
+- `translate` / `sum` 需要 LLM API Key，走 `--api-key` 或环境变量 `KITS_LLM_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY`。默认走 DeepSeek，可用 `--base-url`（或 `KITS_LLM_BASE_URL`）接入其他 OpenAI 兼容端点（OpenAI / Ollama / vLLM 等）；自定义端点允许空 Key。
 - `separate` 依赖 `audio-separator[gpu]`（含 onnxruntime-gpu），首次运行会下载分离模型；同样要 CUDA GPU。
 - **onnxruntime GPU 加速的两个坑**（`.onnx`/MDX 模型走 onnxruntime，`.ckpt`/MDXC roformer 走 torch）：
   1. `punctuators` 间接依赖 **CPU 版 `onnxruntime`**，会和 `audio-separator[gpu]` 的 `onnxruntime-gpu` 装进同一个 `onnxruntime/` 目录、CPU 版 dll 顶掉 GPU 版，导致 `CUDAExecutionProvider` 丢失、`.onnx` 分离静默退回 CPU（慢数倍）。靠 `pyproject.toml` 的 `[tool.uv] override-dependencies = ["onnxruntime ; sys_platform == 'never'"]` 禁止 CPU 版被装入。改完需 `uv sync --reinstall-package onnxruntime-gpu` 恢复被覆盖的 GPU dll。
@@ -46,13 +46,14 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 
 - `subtitle.py` — 纯函数库，**不依赖 torch/网络**，可独立单测。负责单词级时间戳 → 完整句子的断句、SRT 渲染、SRT 解析（`parse_srt` / `srt_time_to_seconds`），以及增量写入器 `SrtWriter`（分段转录时序号跨段连续、逐段 flush 落盘）。`Word` / `Sentence` 是贯穿全项目的 TypedDict 数据契约。
 - `filters.py` — 纯函数库，剔除游戏内系统播报 / 技能语音（整条完全匹配）。
-- `deepseek.py` — **公共 DeepSeek 客户端**，仅依赖 httpx。封装 API Key 解析（参数优先于 `DEEPSEEK_API_KEY`）、`chat()` 单次请求、错误处理（`DeepSeekError`）。`translator` 与 `summarizer` 共用，批处理 / map-reduce 等领域策略留各自模块。
+- `llm.py` — **公共 OpenAI 兼容 LLM 客户端** `LLMClient`，仅依赖 httpx。封装 base_url 解析（参数 > `KITS_LLM_BASE_URL` > 默认 DeepSeek，自动补 `/chat/completions`）、API Key 解析（参数 > `KITS_LLM_API_KEY` > `OPENAI_API_KEY` > `DEEPSEEK_API_KEY`）、`chat()` 单次请求、错误处理（`LLMError`）。空 Key 策略：默认 DeepSeek 端点强制要 Key，自定义端点允许空 Key（本地 Ollama 等）。`translator` 与 `summarizer` 共用，批处理 / map-reduce 等领域策略留各自模块。
+- `deepseek.py` — 向后兼容转发层，从 `llm.py` re-export 并保留 `DeepSeekClient` = `LLMClient`、`DeepSeekError` = `LLMError` 别名。新代码直接用 `kits.llm.LLMClient`。
 - `transcriber.py` — 封装 Whisper pipeline 的加载与转录。`transcribe()` 整段转；`transcribe_segmented()` 按静音切分长音频后分段流式产出（生成器）。依赖 torch/transformers，静音探测与切分依赖 ffmpeg/ffprobe。**时间戳粒度**：用 `return_timestamps=True`（chunk/短语级），不用 `"word"`——因 kotoba 等蒸馏模型解码器仅 2 层，但其 alignment_heads 继承自 large-v3（引用第 25 层），抽词级时间戳会 `IndexError`。chunk 结构同为 `{"text", "timestamp": (start, end)}`，兼容 `Word` 契约。
 - `punctuator.py` — `Punctuator`，给无标点的转录 chunk 批量补日语句读（。！？），**时间戳原样保留**。复用 kotoba 官方同款标点模型（punctuators 库 `PunctCapSegModelONNX`）。蒸馏模型 chunk 不带句末标点会使 `segment_sentences` 的标点断句失效，补标点后才能在 chunk 边界正常断句。重依赖 punctuators（ONNX），**延迟导入**。
 - `downloader.py` — `TwitchDownloader`，异步下载 TS 分片 → ffmpeg 合并 MP4 → 可选提取 MP3。仅依赖 httpx + ffmpeg，**不依赖 torch**。
-- `translator.py` — `DeepSeekTranslator`，经 `deepseek.DeepSeekClient` 把日语句子逐批译成中文。`TranslationError` 继承 `DeepSeekError`（保留历史契约）。
+- `translator.py` — `DeepSeekTranslator`，经 `llm.LLMClient` 把日语句子逐批译成中文。`TranslationError` 继承 `LLMError`（即 `DeepSeekError`，保留历史契约）。
 - `separator.py` — `VocalSeparator`，封装 audio-separator 分离人声（默认只出 Vocals 轨）。重依赖 audio-separator（含 torch/onnxruntime），**延迟导入**（`load()` 内才 import）。底层统一产出**无损 WAV** 作中间产物，最终格式/比特率由 `_encode_final` 用 ffmpeg 一次性套用。长音频按 `segment_minutes`（默认 15）切段→逐段分离→ffmpeg concat 合并，避免一次性出整轨爆内存。比特率默认对齐原音频（探音频流比特率 → 向上取整到 2 的幂 kbps、夹 [32,320]、留 5% 容差吸收 MP3 标称偏差），`--output-bitrate` 可覆盖；无损格式忽略比特率。
-- `summarizer.py` — `Summarizer`，经 `deepseek.DeepSeekClient` 对 SRT 做 AI 总结。提示词走 JSON 预设（包内 `prompts.json` + 用户 `--prompt-file` 覆盖），长字幕 map-reduce 分块。纯逻辑（`load_presets` / `resolve_preset` / `format_sentences` / `chunk_sentences`）不触网、可单测。
+- `summarizer.py` — `Summarizer`，经 `llm.LLMClient` 对 SRT 做 AI 总结。提示词走 JSON 预设（包内 `prompts.json` + 用户 `--prompt-file` 覆盖），长字幕 map-reduce 分块。纯逻辑（`load_presets` / `resolve_preset` / `format_sentences` / `chunk_sentences`）不触网、可单测。
 - `data/prompts.json` — 内置总结提示词预设（timeline / summary / highlights / setlist）+ `reduce_system` 合并提示词，随包发布（置于 `data/` 子目录与 .py 源码分离）。
 - `cli.py` — argparse 子命令 `download` / `subtitle` / `translate` / `separate` / `summarize`（分别带简写别名 `dl` / `srt` / `tr` / `sep` / `sum`），把各模块串成流水线。子命令用 `set_defaults(func=...)` 绑定处理函数，别名与规范名统一分发。
 
@@ -66,7 +67,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 关键约定：
 
 - `cli.py` 中对 `transcriber` / `downloader` / `translator` / `separator` / `summarizer` / `punctuator` 用**延迟导入**（函数内 import），避免无谓加载 GPU 栈或网络栈。新增重依赖模块时沿用此模式。
-- DeepSeek 调用统一走 `deepseek.DeepSeekClient`，不要在 `translator` / `summarizer` 里重复写 HTTP / 鉴权。新增 DeepSeek 能力时复用该客户端，领域逻辑（分批、提示词）留各自模块。
+- LLM 调用统一走 `llm.LLMClient`（OpenAI 兼容，默认 DeepSeek；`deepseek.DeepSeekClient` 为向后兼容别名），不要在 `translator` / `summarizer` 里重复写 HTTP / 鉴权。新增 LLM 能力时复用该客户端，领域逻辑（分批、提示词）留各自模块。
 - `download --srt` 隐含 `--mp3`（生成字幕必须先有音频），逻辑在 `_run_download` 的 `need_mp3 = args.mp3 or args.srt`。
 - 断句与分段参数（`--max-gap` / `--target-chunk` 等）由 `_add_subtitle_args` 在 download / subtitle 间共用。
 - TS URL 里的分片编号**仅用于定位 base_url**，下载范围默认从 0 开始、用指数探测+二分定位结尾（`detect_end_number`）。
@@ -77,6 +78,6 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 
 - **新增总结预设**：直接在 `src/kits/data/prompts.json` 的 `presets` 里加一项（含 `description` + `system`），或让用户用 `--prompt-file` 传外部 JSON 覆盖，无需改代码。
 - **新增游戏播报过滤**：在 `filters.py` 的 `GAME_CALLOUTS` / `_GAME_ALIASES` 登记词表与别名。
-- **新增 DeepSeek 能力**：复用 `deepseek.DeepSeekClient`，在 `cli.py` 加子命令（沿用延迟导入，参考 `translate` / `sum`）。
+- **新增 LLM 能力**：复用 `llm.LLMClient`（默认 DeepSeek，可配 `base_url` 接其他 OpenAI 兼容端点），在 `cli.py` 加子命令（沿用延迟导入，参考 `translate` / `sum`）。
 - **换人声分离模型**：`separate --model <文件名>` 或 `subtitle --separate --separate-model <文件名>`，模型名走 audio-separator 的模型库（`uv run audio-separator --list_models` 查可用名）。`.onnx`/MDX 走 onnxruntime GPU、`.ckpt`/MDXC roformer 走 torch GPU，两条链路的加速参数语义不同（见「注意」段）。
 - **调人声分离速度/体积**：慢先确认 onnxruntime 走的是 GPU（`uv run python -c "import onnxruntime;print(onnxruntime.get_available_providers())"` 应含 `CUDAExecutionProvider`）；再调 `--segment-size` / `--overlap`。长音频爆内存调小 `--segment-minutes`。输出体积靠 `--output-bitrate`（默认已对齐原音频）。

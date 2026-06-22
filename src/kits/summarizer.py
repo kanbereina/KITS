@@ -31,7 +31,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
-from kits.deepseek import DEFAULT_MODEL, DeepSeekClient, DeepSeekError
+from kits.llm import DEFAULT_MODEL, LLMClient, LLMError
 from kits.subtitle import Sentence, seconds_to_srt_time
 
 __all__ = [
@@ -181,14 +181,17 @@ class Summarizer:
         prompt_file: str | None = None,
         max_chars: int = 8000,
         timeout: float = 180.0,
+        base_url: str | None = None,
     ):
         # 先解析预设（可能抛 SummarizeError），再建客户端
         config = load_presets(prompt_file)
         self.preset_name, self._system = config.resolve(preset)
         self._reduce_system = config.reduce_system
         try:
-            self._client = DeepSeekClient(api_key=api_key, model=model, timeout=timeout)
-        except DeepSeekError as e:
+            self._client = LLMClient(
+                api_key=api_key, model=model, base_url=base_url, timeout=timeout
+            )
+        except LLMError as e:
             raise SummarizeError(str(e)) from e
         self.max_chars = max_chars
 

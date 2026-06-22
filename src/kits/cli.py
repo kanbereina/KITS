@@ -199,8 +199,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tr.add_argument("-i", "--input", required=True, help="输入 SRT 字幕文件(必填)")
     tr.add_argument("-o", "--output", default=None, help="输出 SRT(默认在原名后加 .zh)")
-    tr.add_argument("--api-key", default=None, help="DeepSeek API Key(默认读环境变量 DEEPSEEK_API_KEY)")
-    tr.add_argument("--model", default="deepseek-chat", help="DeepSeek 模型名")
+    tr.add_argument(
+        "--api-key", default=None,
+        help="LLM API Key(默认读环境变量 KITS_LLM_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY)",
+    )
+    tr.add_argument(
+        "--base-url", default=None,
+        help="OpenAI 兼容端点 base_url(默认 DeepSeek，可指向 OpenAI/Ollama/vLLM 等；"
+             "也可读环境变量 KITS_LLM_BASE_URL)",
+    )
+    tr.add_argument("--model", default="deepseek-chat", help="LLM 模型名(默认 deepseek-chat)")
     tr.add_argument("--batch-size", type=int, default=20, help="每批翻译的字幕条数")
     tr.set_defaults(func=_run_translate)
 
@@ -251,8 +259,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sm.add_argument("-i", "--input", required=True, help="输入 SRT 字幕文件(必填)")
     sm.add_argument("-o", "--output", default=None, help="输出总结文件(默认在原名后加 .summary.md)")
-    sm.add_argument("--api-key", default=None, help="DeepSeek API Key(默认读环境变量 DEEPSEEK_API_KEY)")
-    sm.add_argument("--model", default="deepseek-chat", help="DeepSeek 模型名")
+    sm.add_argument(
+        "--api-key", default=None,
+        help="LLM API Key(默认读环境变量 KITS_LLM_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY)",
+    )
+    sm.add_argument(
+        "--base-url", default=None,
+        help="OpenAI 兼容端点 base_url(默认 DeepSeek，可指向 OpenAI/Ollama/vLLM 等；"
+             "也可读环境变量 KITS_LLM_BASE_URL)",
+    )
+    sm.add_argument("--model", default="deepseek-chat", help="LLM 模型名(默认 deepseek-chat)")
     sm.add_argument(
         "--preset",
         default=None,
@@ -460,7 +476,8 @@ def _run_translate(args: argparse.Namespace) -> None:
     )
 
     translator = DeepSeekTranslator(
-        api_key=args.api_key, model=args.model, batch_size=args.batch_size
+        api_key=args.api_key, model=args.model, batch_size=args.batch_size,
+        base_url=args.base_url,
     )
 
     # 边翻译边写盘：批次严格串行（无并发），故产出顺序即字幕顺序，可安全增量写。
@@ -536,6 +553,7 @@ def _run_sum(args: argparse.Namespace) -> None:
             preset=args.preset,
             prompt_file=args.prompt_file,
             max_chars=args.max_chars,
+            base_url=args.base_url,
         )
         summary = summarizer.summarize(sentences)
     except SummarizeError as e:
