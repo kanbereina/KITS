@@ -44,7 +44,7 @@ _鹿乃 Twitch 直播智能总结_
 - **日语识别更准** — 默认 [kotoba-whisper-v2.2](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.2) 蒸馏模型，自动补日语句读后再断句，字幕是完整句子而非碎片。
 - **句子完整不截断** — 长音频按静音切分、分段流式转写，切点落在无人说话处，边转边落盘，精度与整段转写一致。
 - **唱歌场次友好** — 内置 audio-separator 人声分离，长音频自动切段防爆内存、输出比特率对齐原音频，去掉 BGM / 伴奏再识别。
-- **省心的中文化** — DeepSeek 逐条翻译保留时间轴，并能按时间线 / 概述 / 高光 / 歌单等预设一键总结整场直播。
+- **省心的中文化** — AI 逐条翻译保留时间轴，并能按时间线 / 概述 / 高光 / 歌单等预设一键总结整场直播。
 - **专为 50 系显卡调优，兼顾 Apple Silicon** — Nvidia 走 `pytorch-cu128`（CUDA 12.8），onnxruntime 复用 torch 自带 CUDA 运行时，开箱即用 GPU 加速；macOS（M 系列）自动切到 MPS 加速栈。
 
 ## 功能特性
@@ -56,8 +56,8 @@ _鹿乃 Twitch 直播智能总结_
 - ✒️ 蒸馏模型只产短语级时间戳且不带标点，自动用标点模型补日语句读（。！？）后再断句，时间戳原样保留
 - 🪓 长音频**按静音切分、分段流式转录**：实时进度、边转边写盘，切点落在无人说话处，精度不受影响
 - 🔗 下载与字幕一条龙：一条命令从直播 URL 直达 SRT 字幕
-- 🌐 调用 DeepSeek 把日语 SRT 翻译成中文 SRT，逐条对应、保留原时间轴
-- 🤖 调用 DeepSeek 对 SRT 字幕做 AI 总结，提示词走 JSON 预设（时间线 / 概述 / 高光 / 歌单），长字幕自动分块
+- 🌐 调用大模型把日语 SRT 翻译成中文 SRT，逐条对应、保留原时间轴（默认 DeepSeek，可接其他 OpenAI 兼容端点）
+- 🤖 调用大模型对 SRT 字幕做 AI 总结，提示词走 JSON 预设（时间线 / 概述 / 高光 / 歌单），长字幕自动分块（默认 DeepSeek，可接其他 OpenAI 兼容端点）
 - 🎚️ 用 audio-separator 分离人声，可单独导出，也可在转录前 `--separate` 预处理去掉 BGM / 唱歌干扰
 - 🧹 自动清理重复字符与乱码，并抑制模型的幻觉式重复
 - 🎮 可选剔除 VALORANT 游戏内系统播报 / 技能语音（如「残り1名」「グレネード配置」），让字幕聚焦主播人声
@@ -94,13 +94,15 @@ uv run kits --help          # 看到子命令说明即安装成功
 uv run python -c "import torch; print('CUDA:', torch.cuda.is_available(), '| MPS:', torch.backends.mps.is_available())"
 ```
 
-**4.（可选）配置 DeepSeek**
+**4.（可选）配置大模型 API Key**
 
-`translate` / `summarize` 需要 DeepSeek API Key，使用命令时传入或设置环境变量：
+`translate` / `summarize` 需要大模型 API Key，默认走 DeepSeek。使用命令时传入或设置环境变量：
 
 ```bash
 export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY="sk-xxxx"
 ```
+
+> 也可用 `KITS_LLM_API_KEY` / `OPENAI_API_KEY`，或用 `--base-url` 接入其他 OpenAI 兼容端点（OpenAI / Ollama / vLLM 等），详见下方「接入其他 OpenAI 兼容端点」。
 
 > 首次运行转字幕会自动从 Hugging Face 下载模型（kotoba-whisper 约几个 GB + 标点模型约 1GB），需要联网；之后走本地缓存。
 
@@ -112,7 +114,7 @@ export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY
 | GPU | 支持 CUDA 的 Nvidia 显卡，或 Apple Silicon（M 系列） | 转字幕 / 分离人声强制要求；仅下载不需要 |
 | CUDA | 12.8（仅 Nvidia） | Linux/Win 的 PyTorch 从 `pytorch-cu128` 源安装，勿换 PyPI 默认源；macOS 不需要 |
 | ffmpeg | 在 PATH 中 | 合并 MP4、提取 MP3、音频切分 |
-| API Key | DeepSeek（可选） | 仅 `translate` / `summarize` 需要 |
+| API Key | 大模型（可选） | 仅 `translate` / `summarize` 需要，默认 DeepSeek |
 
 ## 使用方法
 
@@ -266,7 +268,7 @@ uv run kits subtitle -i live.mp3 --filter-game valorant --filter-game valo
 
 ### translate：日语字幕译中文
 
-把已有的日语 SRT 字幕调用 DeepSeek 翻译成中文 SRT，逐条对应、保留原时间轴。需要 DeepSeek API Key：
+把已有的日语 SRT 字幕调用大模型翻译成中文 SRT，逐条对应、保留原时间轴。需要大模型 API Key（默认 DeepSeek）：
 
 ```bash
 # 用环境变量提供 Key（推荐）
@@ -325,7 +327,7 @@ uv run kits separate -i live.mp3 -o vocals.wav --model Kim_Vocal_2.onnx
 
 ### summarize：AI 总结字幕
 
-把已有 SRT 字幕交给 DeepSeek 做总结，方便快速回顾整场直播。提示词走 JSON 预设，长字幕会自动分块总结再合并。需要 DeepSeek API Key（命令可简写为 `sum`）：
+把已有 SRT 字幕交给大模型做总结，方便快速回顾整场直播。提示词走 JSON 预设，长字幕会自动分块总结再合并。需要大模型 API Key（默认 DeepSeek，命令可简写为 `sum`）：
 
 ```bash
 export DEEPSEEK_API_KEY=sk-xxxx
@@ -414,13 +416,13 @@ src/kits/
   __init__.py      # 包入口，导出字幕相关纯逻辑 API
   subtitle.py      # 纯逻辑：单词时间戳 -> 完整句子 -> SRT，含 SRT 解析与增量写入（无 torch 依赖，可单测）
   filters.py       # 纯逻辑：剔除游戏内系统播报 / 技能语音（无 torch 依赖，可单测）
-  deepseek.py      # 公共 DeepSeek 客户端：鉴权 + HTTP + 错误处理（仅 httpx，translate/sum 共用）
+  llm.py           # 公共 OpenAI 兼容 LLM 客户端：base_url + 鉴权 + HTTP + 错误处理（仅 httpx，translate/sum 共用）
   transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按静音切分、分段流式产出 chunk 级时间戳
   punctuator.py    # 标点恢复：给无标点的转录 chunk 补日语句读（延迟导入 punctuators），时间戳不变
   downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
-  translator.py    # 调用 DeepSeek 把日语 SRT 翻译成中文 SRT（经 deepseek 客户端）
+  translator.py    # 把日语 SRT 翻译成中文 SRT（经 llm 客户端，默认 DeepSeek）
   separator.py     # 人声分离：封装 audio-separator（延迟导入，默认只出 Vocals 轨）
-  summarizer.py    # 调用 DeepSeek 总结 SRT，提示词走 JSON 预设、长字幕 map-reduce 分块
+  summarizer.py    # 总结 SRT，提示词走 JSON 预设、长字幕 map-reduce 分块（经 llm 客户端，默认 DeepSeek）
   data/
     prompts.json   # 内置总结提示词预设（timeline / summary / highlights / setlist）
   cli.py           # 命令行入口（download / subtitle / translate / separate / summarize 子命令，各带简写别名）
