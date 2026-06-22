@@ -14,9 +14,9 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""字幕总结：调用 DeepSeek 把已有 SRT 字幕总结成可读的回顾文本。
+"""字幕总结：调用 OpenAI 兼容 LLM 把已有 SRT 字幕总结成可读的回顾文本。
 
-仅依赖 httpx（经由 kits.deepseek 公共客户端），不引入 torch / transformers。
+仅依赖 httpx（经由 kits.llm 公共客户端），不引入 torch / transformers。
 消费 kits.subtitle.parse_srt 产出的句子列表。
 
 提示词走 JSON 预设：包内置 prompts.json 提供多种预设（timeline / summary /
@@ -31,7 +31,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
-from kits.deepseek import DEFAULT_MODEL, DeepSeekClient, DeepSeekError
+from kits.llm import DEFAULT_MODEL, LLMClient, LLMError
 from kits.subtitle import Sentence, seconds_to_srt_time
 
 __all__ = [
@@ -171,7 +171,7 @@ def chunk_sentences(
 
 
 class Summarizer:
-    """DeepSeek 字幕总结器。按预设提示词总结字幕，长字幕走 map-reduce。"""
+    """字幕总结器。按预设提示词总结字幕，长字幕走 map-reduce。"""
 
     def __init__(
         self,
@@ -181,14 +181,17 @@ class Summarizer:
         prompt_file: str | None = None,
         max_chars: int = 8000,
         timeout: float = 180.0,
+        base_url: str | None = None,
     ):
         # 先解析预设（可能抛 SummarizeError），再建客户端
         config = load_presets(prompt_file)
         self.preset_name, self._system = config.resolve(preset)
         self._reduce_system = config.reduce_system
         try:
-            self._client = DeepSeekClient(api_key=api_key, model=model, timeout=timeout)
-        except DeepSeekError as e:
+            self._client = LLMClient(
+                api_key=api_key, model=model, base_url=base_url, timeout=timeout
+            )
+        except LLMError as e:
             raise SummarizeError(str(e)) from e
         self.max_chars = max_chars
 

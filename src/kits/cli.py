@@ -18,9 +18,9 @@
 
 download:  下载 Twitch 直播 -> 合并 MP4 -> 可选 MP3 / SRT
 subtitle:  已有音频 -> SRT 字幕（可选 --separate 先分离人声）
-translate: 日语 SRT -> 中文 SRT（DeepSeek 翻译）
+translate: 日语 SRT -> 中文 SRT（AI 翻译）
 separate:  从音频分离出人声（audio-separator）
-sum:       已有 SRT -> AI 总结（DeepSeek，提示词走 JSON 预设）
+sum:       已有 SRT -> AI 总结（提示词走 JSON 预设）
 """
 
 from __future__ import annotations
@@ -195,12 +195,20 @@ def build_parser() -> argparse.ArgumentParser:
     # --- translate 子命令 ---
     tr = sub.add_parser(
         "translate", aliases=["tr"], parents=[verbose_parent],
-        help="把日语 SRT 翻译成中文 SRT(DeepSeek)",
+        help="把日语 SRT 翻译成中文 SRT(AI)",
     )
     tr.add_argument("-i", "--input", required=True, help="输入 SRT 字幕文件(必填)")
     tr.add_argument("-o", "--output", default=None, help="输出 SRT(默认在原名后加 .zh)")
-    tr.add_argument("--api-key", default=None, help="DeepSeek API Key(默认读环境变量 DEEPSEEK_API_KEY)")
-    tr.add_argument("--model", default="deepseek-chat", help="DeepSeek 模型名")
+    tr.add_argument(
+        "--api-key", default=None,
+        help="LLM API Key(默认读环境变量 KITS_LLM_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY)",
+    )
+    tr.add_argument(
+        "--base-url", default=None,
+        help="OpenAI 兼容端点 base_url(默认 DeepSeek，可指向 OpenAI/Ollama/vLLM 等；"
+             "也可读环境变量 KITS_LLM_BASE_URL)",
+    )
+    tr.add_argument("--model", default="deepseek-chat", help="LLM 模型名(默认 deepseek-chat)")
     tr.add_argument("--batch-size", type=int, default=20, help="每批翻译的字幕条数")
     tr.set_defaults(func=_run_translate)
 
@@ -247,12 +255,20 @@ def build_parser() -> argparse.ArgumentParser:
     # --- summarize 子命令 ---
     sm = sub.add_parser(
         "summarize", aliases=["sum"], parents=[verbose_parent],
-        help="对已有 SRT 字幕用 AI 总结(DeepSeek)",
+        help="对已有 SRT 字幕用 AI 总结",
     )
     sm.add_argument("-i", "--input", required=True, help="输入 SRT 字幕文件(必填)")
     sm.add_argument("-o", "--output", default=None, help="输出总结文件(默认在原名后加 .summary.md)")
-    sm.add_argument("--api-key", default=None, help="DeepSeek API Key(默认读环境变量 DEEPSEEK_API_KEY)")
-    sm.add_argument("--model", default="deepseek-chat", help="DeepSeek 模型名")
+    sm.add_argument(
+        "--api-key", default=None,
+        help="LLM API Key(默认读环境变量 KITS_LLM_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY)",
+    )
+    sm.add_argument(
+        "--base-url", default=None,
+        help="OpenAI 兼容端点 base_url(默认 DeepSeek，可指向 OpenAI/Ollama/vLLM 等；"
+             "也可读环境变量 KITS_LLM_BASE_URL)",
+    )
+    sm.add_argument("--model", default="deepseek-chat", help="LLM 模型名(默认 deepseek-chat)")
     sm.add_argument(
         "--preset",
         default=None,
@@ -437,10 +453,10 @@ def _run_subtitle(args: argparse.Namespace) -> None:
 
 
 def _run_translate(args: argparse.Namespace) -> None:
-    from kits.translator import DeepSeekTranslator
+    from kits.translator import LLMTranslator
 
     print("=" * 60)
-    print("🌐 DeepSeek 字幕翻译（日语 -> 中文）")
+    print("🌐 AI 字幕翻译（日语 -> 中文）")
     print("=" * 60)
 
     input_path = Path(args.input)
@@ -459,8 +475,9 @@ def _run_translate(args: argparse.Namespace) -> None:
         else input_path.with_suffix(f".zh{input_path.suffix}")
     )
 
-    translator = DeepSeekTranslator(
-        api_key=args.api_key, model=args.model, batch_size=args.batch_size
+    translator = LLMTranslator(
+        api_key=args.api_key, model=args.model, batch_size=args.batch_size,
+        base_url=args.base_url,
     )
 
     # 边翻译边写盘：批次严格串行（无并发），故产出顺序即字幕顺序，可安全增量写。
@@ -517,7 +534,7 @@ def _run_sum(args: argparse.Namespace) -> None:
     from kits.summarizer import SummarizeError, Summarizer
 
     print("=" * 60)
-    print("🤖 DeepSeek 字幕总结")
+    print("🤖 AI 字幕总结")
     print("=" * 60)
 
     input_path = Path(args.input)
@@ -536,6 +553,7 @@ def _run_sum(args: argparse.Namespace) -> None:
             preset=args.preset,
             prompt_file=args.prompt_file,
             max_chars=args.max_chars,
+            base_url=args.base_url,
         )
         summary = summarizer.summarize(sentences)
     except SummarizeError as e:
