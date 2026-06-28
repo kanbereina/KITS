@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from kits.cli import _make_bar, build_parser
+import pytest
+
+from kits.cli import _make_bar, _split_ytdlp_passthrough, build_parser
 
 
 class TestMakeBar:
@@ -49,27 +51,41 @@ class TestMakeBar:
 
 
 class TestDownloadParser:
-    def test_download_backend_defaults_to_auto(self):
-        args = build_parser().parse_args(["download", "https://example.com/chunked/0.ts"])
+    def test_download_defaults_to_ytdlp_audio(self):
+        args = build_parser().parse_args(["download", "https://example.com/watch?v=abc"])
 
-        assert args.backend == "auto"
-        assert args.audio_only is False
-        assert args.yt_format is None
-        assert args.concurrent == 5
+        assert args.url == "https://example.com/watch?v=abc"
+        assert args.output == "output"
+        assert args.dir == "downloads"
+        assert args.yt_dlp_args is None
+        assert args.srt is False
 
-    def test_download_accepts_ytdlp_options(self):
+    def test_download_accepts_ytdlp_args_string(self):
         args = build_parser().parse_args(
             [
                 "download",
                 "https://www.youtube.com/watch?v=abc",
-                "--backend",
-                "yt-dlp",
-                "--audio-only",
-                "--yt-format",
-                "bestaudio/best",
+                "--yt-dlp-args",
+                "-f bestaudio --extract-audio",
             ]
         )
 
-        assert args.backend == "yt-dlp"
-        assert args.audio_only is True
-        assert args.yt_format == "bestaudio/best"
+        assert args.yt_dlp_args == "-f bestaudio --extract-audio"
+
+    def test_split_ytdlp_passthrough_keeps_normal_kits_args(self):
+        argv, passthrough = _split_ytdlp_passthrough(["download", "url", "--srt"])
+
+        assert argv == ["download", "url", "--srt"]
+        assert passthrough == []
+
+    def test_split_ytdlp_passthrough_extracts_args_after_separator(self):
+        argv, passthrough = _split_ytdlp_passthrough(["download", "url", "--srt", "--", "-f", "bestaudio"])
+
+        assert argv == ["download", "url", "--srt"]
+        assert passthrough == ["-f", "bestaudio"]
+
+    def test_rejects_passthrough_for_non_download_command(self):
+        with pytest.raises(SystemExit):
+            from kits.cli import main
+
+            main(["subtitle", "-i", "audio.mp3", "--", "-f", "bestaudio"])

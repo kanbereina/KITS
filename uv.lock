@@ -610,10 +610,6 @@ dependencies = [
     { name = "torchaudio", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform != 'darwin'" },
     { name = "tqdm" },
     { name = "transformers" },
-]
-
-[package.optional-dependencies]
-ytdlp = [
     { name = "yt-dlp" },
 ]
 
@@ -639,9 +635,8 @@ requires-dist = [
     { name = "torchaudio", marker = "sys_platform == 'darwin'", specifier = ">=2.11.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
     { name = "transformers", specifier = ">=5.12.0" },
-    { name = "yt-dlp", marker = "extra == 'ytdlp'", specifier = ">=2026.1.1" },
+    { name = "yt-dlp", specifier = ">=2026.1.1" },
 ]
-provides-extras = ["ytdlp"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目简介
 
-KITS 是基于 Whisper 的鹿乃直播/视频工具：下载 Twitch 直播分片或 yt-dlp 支持的视频/直播回放、合并 MP4 / 提取 MP3，把音频转成带时间戳的 SRT 字幕，可调用 DeepSeek 把日语字幕翻译成中文、对字幕做 AI 总结，并支持用 audio-separator 分离人声。沟通与代码注释一律用中文；日语仅是转录处理的目标内容。
+KITS 是基于 Whisper 的鹿乃直播/视频工具：用 yt-dlp 下载 Twitch / YouTube 等视频或直播回放并提取 MP3，把音频转成带时间戳的 SRT 字幕，可调用 DeepSeek 把日语字幕翻译成中文、对字幕做 AI 总结，并支持用 audio-separator 分离人声。沟通与代码注释一律用中文；日语仅是转录处理的目标内容。
 
 ## 常用命令
 
@@ -12,8 +12,7 @@ KITS 是基于 Whisper 的鹿乃直播/视频工具：下载 Twitch 直播分片
 
 ```bash
 uv sync                                   # 同步依赖（含 dev 组）
-uv sync --extra ytdlp                    # 额外安装 yt-dlp 通用下载后端
-uv run kits download "<ts_url>" -o name   # 下载直播（别名 dl）
+uv run kits download "<url>" -o name      # yt-dlp 下载音频（别名 dl）
 uv run kits subtitle -i audio.mp3         # 音频转 SRT（别名 srt）
 uv run kits translate -i live.srt         # 日语 SRT 译中文（别名 tr；需 DEEPSEEK_API_KEY）
 uv run kits separate -i audio.mp3         # 分离人声（别名 sep；需 audio-separator + GPU）
@@ -32,8 +31,8 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - 转录（`subtitle` / `download --srt`）强制要求 GPU 加速：CUDA(Nvidia) 或 MPS(Apple Silicon)，纯 CPU 环境会直接抛错（设备选择见 `transcriber.select_device()`，优先 CUDA、其次 MPS）。
 - **依赖按平台分流**（见 `pyproject.toml`）：Linux/Win 走 CUDA 栈（torch `pytorch-cu128` + `onnxruntime-gpu` + `audio-separator[gpu]`）；macOS(Apple Silicon) 无 CUDA 轮子，自动落到 PyPI 默认源 torch（自带 MPS）+ `onnxruntime`(CPU/CoreML) + `audio-separator[cpu]`。关键三处：torch 源用 `marker = "sys_platform != 'darwin'"` 仅对非 darwin 生效、`pytorch-cu128` 索引置 `explicit = true`（否则 torch 被绑死该索引、mac 不回落 PyPI）、`required-environments` 声明 darwin-arm64（强制 uv 为 mac 单独求解出有 arm64 轮子的 torch 版本，否则通用解析会把全平台锁到 `+cu128` 本地版导致 mac sync 失败）。`override-dependencies` 的 onnxruntime 禁装 marker 改为 `sys_platform == 'darwin'`：mac 上*需要* CPU 版、非 darwin 才禁（防 CPU 版顶掉 GPU 版 dll）。改依赖后 `uv lock` 会按平台分出两份 torch stanza。
 - 默认模型 `kotoba-tech/kotoba-whisper-v2.2`（日语识别更准的蒸馏模型）。它只产 chunk 级时间戳、不带句末标点，故转录后默认走 `punctuator` 标点恢复再断句（`--no-punctuate` 关闭）。换用本身带 word 级时间戳 + 标点的模型时可关。
-- 合并 MP4、提取 MP3 依赖系统 `ffmpeg`，须在 PATH 中。
-- yt-dlp 是可选 extra：`uv sync --extra ytdlp` 后，`download --backend auto` 会对非数字 `.ts` URL 走 `YtDlpDownloader`；旧 Twitch TS URL 仍默认走 `TwitchDownloader` 直连。
+- yt-dlp 音频提取/转码、音频切分依赖系统 `ffmpeg`，须在 PATH 中。
+- yt-dlp 是核心依赖，`download` 统一走 `YtDlpDownloader`，默认最佳音频 + 提取 MP3；分片并发默认 5。高级参数通过 `download URL -- <yt-dlp 原生参数>` 或 `--yt-dlp-args` 透传。
 - `translate` / `sum` 需要 LLM API Key，走 `--api-key` 或环境变量 `KITS_LLM_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY`。默认走 DeepSeek，可用 `--base-url`（或 `KITS_LLM_BASE_URL`）接入其他 OpenAI 兼容端点（OpenAI / Ollama / vLLM 等）；自定义端点允许空 Key。
 - `separate` 依赖 `audio-separator[gpu]`（含 onnxruntime-gpu），首次运行会下载分离模型；同样要 CUDA GPU。
 - **onnxruntime GPU 加速的两个坑**（`.onnx`/MDX 模型走 onnxruntime，`.ckpt`/MDXC roformer 走 torch）：
@@ -52,7 +51,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - `transcriber.py` — 封装 Whisper pipeline 的加载与转录。`transcribe()` 整段转；长音频走两段式：`plan_audio()` 探时长 + VAD 探人声间隙 + `plan_segments` 切段（返回 `(duration, segments)`，**在转录进度条创建前**调用，VAD 加载/扫描日志才不冲乱进度条），`transcribe_segments()` 拿预规划的段逐段流式产出（生成器）。依赖 torch/transformers，切分依赖 `kits.vad`（VAD）+ ffmpeg/ffprobe。**时间戳粒度**：用 `return_timestamps=True`（chunk/短语级），不用 `"word"`——因 kotoba 等蒸馏模型解码器仅 2 层，但其 alignment_heads 继承自 large-v3（引用第 25 层），抽词级时间戳会 `IndexError`。chunk 结构同为 `{"text", "timestamp": (start, end)}`，兼容 `Word` 契约。`plan_segments` 在窗口 `(target_chunk, max_chunk)` 内挑「时长最长的非语音间隙中点」切，窗口内无间隙才在 `max_chunk` 硬切兜底。
 - `vad.py` — `VADetector`，用 **Silero VAD** 探出人声区间、反推非语音间隙（`speech_to_gaps` 取补集，纯逻辑可单测），喂给 `transcriber.plan_segments` 作切点来源。取代旧版纯音量阈值（ffmpeg silencedetect）：VAD 能区分「人声 vs 音乐/噪音」，鹿乃唱歌 / BGM 段也能找到真正人声间隙。**走 silero 默认 jit 后端（不装 onnxruntime extra）**，避开与 `audio-separator[gpu]` 的 onnxruntime-gpu 共目录冲突。音频解码复用 ffmpeg（`decode_pcm` 出 16k 单声道 f32le 裸流 → `torch.frombuffer`，不引入 torchaudio 读取）。重依赖（torch + silero-vad）**延迟导入**。**VAD 固定走 CPU**：silero 按 32ms 一窗逐个推理，长音频窗口数巨大（4h ≈ 47 万窗口），每窗后都要 CPU↔GPU 同步，放 GPU 反被同步 + kernel launch 开销拖垮、比 CPU 慢几个数量级（CPU 实测 ~119x 实时，silero 官方亦建议跑 CPU）。`detect_gaps` 接 silero 的 `progress_tracking_callback` 回报百分比（长音频 VAD 扫全程耗时可观，借此刷进度避免看似卡死）。
 - `punctuator.py` — `Punctuator`，给无标点的转录 chunk 批量补日语句读（。！？），**时间戳原样保留**。复用 kotoba 官方同款标点模型（punctuators 库 `PunctCapSegModelONNX`）。蒸馏模型 chunk 不带句末标点会使 `segment_sentences` 的标点断句失效，补标点后才能在 chunk 边界正常断句。重依赖 punctuators（ONNX），**延迟导入**。
-- `downloader.py` — 下载后端集合。`TwitchDownloader` 异步下载 TS 分片 → ffmpeg 合并 MP4 → 可选提取 MP3，仅依赖 httpx + ffmpeg；`YtDlpDownloader` 通过可选 yt-dlp 下载 YouTube 等更多平台视频/直播回放 → 可选提取 MP3。模块整体**不依赖 torch**，yt-dlp 必须延迟导入。
+- `downloader.py` — `YtDlpDownloader`，通过 yt-dlp 下载 Twitch / YouTube 等更多平台视频或直播回放，默认提取最佳音频为 MP3。模块**不依赖 torch**；用子进程调用 `python -m yt_dlp`，避免在 KITS 内维护 yt-dlp 参数映射。
 - `translator.py` — `LLMTranslator`，经 `llm.LLMClient` 把日语句子逐批译成中文。`TranslationError` 继承 `LLMError`。
 - `separator.py` — `VocalSeparator`，封装 audio-separator 分离人声（默认只出 Vocals 轨）。重依赖 audio-separator（含 torch/onnxruntime），**延迟导入**（`load()` 内才 import）。底层统一产出**无损 WAV** 作中间产物，最终格式/比特率由 `_encode_final` 用 ffmpeg 一次性套用。长音频按 `segment_minutes`（默认 15）切段→逐段分离→ffmpeg concat 合并，避免一次性出整轨爆内存。比特率默认对齐原音频（探音频流比特率 → 向上取整到 2 的幂 kbps、夹 [32,320]、留 5% 容差吸收 MP3 标称偏差），`--output-bitrate` 可覆盖；无损格式忽略比特率。
 - `summarizer.py` — `Summarizer`，经 `llm.LLMClient` 对 SRT 做 AI 总结。提示词走 JSON 预设（包内 `prompts.json` + 用户 `--prompt-file` 覆盖），长字幕 map-reduce 分块。纯逻辑（`load_presets` / `resolve_preset` / `format_sentences` / `chunk_sentences`）不触网、可单测。
@@ -61,7 +60,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 
 数据流：
 
-- 转字幕：`downloader`(MP3；Twitch 直连或 yt-dlp 后端) →（可选 `separator` 分离人声）→ `transcriber.plan_audio()`（VAD 探人声间隙、规划分段，进度条前跑完）→ `transcriber.transcribe_segments()`（逐段产出 chunk 级 list[Word]）→（可选 `punctuator.restore()` 补标点）→ 每段 `subtitle.segment_sentences()`(list[Sentence]) → `subtitle.SrtWriter.append()` 增量写盘。`_audio_to_srt` 是这条流水线，`_maybe_separate` 按 `--separate` 决定是否预处理人声，标点恢复默认开启（`--no-punctuate` 关闭）。
+- 转字幕：`downloader`(MP3；yt-dlp 后端) →（可选 `separator` 分离人声）→ `transcriber.plan_audio()`（VAD 探人声间隙、规划分段，进度条前跑完）→ `transcriber.transcribe_segments()`（逐段产出 chunk 级 list[Word]）→（可选 `punctuator.restore()` 补标点）→ 每段 `subtitle.segment_sentences()`(list[Sentence]) → `subtitle.SrtWriter.append()` 增量写盘。`_audio_to_srt` 是这条流水线，`_maybe_separate` 按 `--separate` 决定是否预处理人声，标点恢复默认开启（`--no-punctuate` 关闭）。
 - 译字幕：SRT 文件 → `subtitle.parse_srt()`(list[Sentence]) → `translator.translate()`(中文 list[Sentence]) → `subtitle.write_srt()`。
 - 分离人声：音频 →（长音频先按 `segment_minutes` 切段）→ `separator.VocalSeparator.separate()`（逐段分离出无损 WAV → ffmpeg concat 合并 → 按目标格式/比特率编码）→ 人声音频文件（可再交给 subtitle）。
 - 总结：SRT 文件 → `subtitle.parse_srt()` → `summarizer.format_sentences/chunk_sentences` → `summarizer.Summarizer.summarize()`（按预设逐块总结，多块再 reduce 合并）→ Markdown 文件。
@@ -70,10 +69,8 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 
 - `cli.py` 中对 `transcriber` / `downloader` / `translator` / `separator` / `summarizer` / `punctuator` 用**延迟导入**（函数内 import），避免无谓加载 GPU 栈或网络栈。新增重依赖模块时沿用此模式。
 - LLM 调用统一走 `llm.LLMClient`（OpenAI 兼容，默认 DeepSeek），不要在 `translator` / `summarizer` 里重复写 HTTP / 鉴权。新增 LLM 能力时复用该客户端，领域逻辑（分批、提示词）留各自模块。
-- `download --srt` 隐含 `--mp3`（生成字幕必须先有音频），逻辑在 `_run_download` 的 `need_mp3 = args.mp3 or args.srt`。
-- `download --backend auto` 对数字 `.ts` 分片走 Twitch 直连，对其他 URL 走 yt-dlp；`--start` / `--end` / `--keep-ts` 仅属于 Twitch 直连，`--audio-only` / `--yt-format` 仅属于 yt-dlp。`--concurrent` 默认 5，两条后端共用；yt-dlp 中映射为 `concurrent_fragment_downloads`（HLS/DASH 分片并发）。
+- `download` 默认产出音频，`--srt` 只是在下载后追加转录。默认 yt-dlp 参数为 `-f bestaudio/best --extract-audio --audio-format mp3 --concurrent-fragments 5`；用户透传参数追加在默认参数之后，可按 yt-dlp 自身规则覆盖。
 - 断句与分段参数（`--max-gap` / `--target-chunk` 等）由 `_add_subtitle_args` 在 download / subtitle 间共用。
-- TS URL 里的分片编号**仅用于定位 base_url**，下载范围默认从 0 开始、用指数探测+二分定位结尾（`detect_end_number`）。
 - 长音频分段：`plan_audio` 用 **Silero VAD**（`kits.vad.VADetector`）探出人声区间、`speech_to_gaps` 反推非语音间隙，`plan_segments` 在窗口 `(target_chunk, max_chunk)` 内选**时长最长**的间隙中点切（最长停顿最可能是真正语句间隙、最不易截断语句；并列取更靠前者）。该窗口内无间隙可切时（极端，如整段连续人声）才在 `max_chunk` 硬上限强切兜底。**VAD 固定走 CPU**：silero VAD 是 LSTM、隐状态时间步串行依赖，架构上无法并行，GPU 反被拖垮（主因），CPU ~119x 实时。VAD 取代旧版 ffmpeg silencedetect 纯音量阈值——能区分人声与音乐/噪音，唱歌 / BGM 段也找得到真正人声间隙，故砍掉了旧版「宽松阈值二次探测」那条退路。**规划阶段（`plan_audio`）在转录进度条创建前跑**，VAD 加载/扫描日志（含百分比进度）才不冲乱进度条。`--vad-threshold`（语音概率，越大越严格）、`--min-silence`（短于此的停顿并入人声、不算间隙）调节灵敏度。切点落在无人说话处故不打断语句、精度不变。短音频（≤ `max_chunk`）跳过 VAD、`transcribe_segments` 整段转原文件。每段取数窗口在逻辑区间两侧外扩 `--segment-overlap`（默认 2s）垫料给模型留接缝上下文（避免硬切吞字/切碎乐句），转录后 `_shift_words` 按窗口起点加回偏移对齐全局时间轴，再用 `_keep_core_words` 按「词中心落在本段逻辑区间 [start,end)」裁掉垫料区的词（首段左/末段右不设限）→ 接缝无缝去重。`plan_segments` 仍返回无缝相接的逻辑区间，垫料只作用于取数窗口。
 - `translator` / `summarizer` 按批 / 分块发送，DeepSeek 调用经公共客户端。翻译用「序号|||文本」格式逐条对应、按序号回填防错位；总结用 map-reduce（逐块总结后 reduce 合并），提示词来自 `prompts.json` 预设。翻译只改文本、时间戳原样保留。
 
