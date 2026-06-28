@@ -171,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-v",
         "--verbose",
         action="store_true",
-        help="显示底层库(transformers/onnxruntime 等)的调试日志，默认隐藏",
+        help="显示底层库(transformers/onnxruntime/audio-separator 等)的调试日志，默认隐藏",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -312,7 +312,7 @@ def _maybe_separate(audio_file: str, args: argparse.Namespace) -> str:
 
     print("\n🎚️  转录前预处理：分离人声")
     out_dir = str(Path(audio_file).parent)
-    kwargs: dict = {"output_dir": out_dir}
+    kwargs: dict = {"output_dir": out_dir, "verbose": getattr(args, "verbose", False)}
     if getattr(args, "separate_model", None):
         kwargs["model_filename"] = args.separate_model
     if getattr(args, "separate_segment_size", None) is not None:
@@ -373,7 +373,8 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
     # 规划阶段：探时长 + （长音频）VAD 扫描 + 分段，在转录进度条创建之前完成。VAD 模型加载与
     # 全程扫描耗时可观，放进度条之前跑完，其日志才不会冲乱进度条（与模型提前 load 同理）。
     # 传 _make_bar 让 VAD 扫描自带一个 0~100% 进度条（与转录进度条顺序出现、互不冲突）。
-    duration, segments = transcriber.plan_audio(
+    # speech 是 VAD 人声区间，透传给 segment_sentences 把 kotoba 虚高 end 夹回真实人声边界。
+    duration, segments, speech = transcriber.plan_audio(
         audio_file,
         target_chunk=args.target_chunk,
         max_chunk=args.max_chunk,
@@ -405,6 +406,7 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
                 max_chars=args.max_chars,
                 max_duration=args.max_duration,
                 max_seconds_per_char=args.max_seconds_per_char,
+                speech=speech,
             )
             if callouts is not None:
                 from kits.filters import filter_sentences
@@ -537,6 +539,7 @@ def _run_separate(args: argparse.Namespace) -> None:
         "overlap": args.overlap,
         "segment_minutes": args.segment_minutes,
         "output_bitrate": args.output_bitrate,
+        "verbose": getattr(args, "verbose", False),
     }
     if args.model:
         kwargs["model_filename"] = args.model
