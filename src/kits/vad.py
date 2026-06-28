@@ -92,8 +92,13 @@ class VADetector:
     """Silero VAD 语音活动探测器。延迟加载模型，复用实例可处理多个文件。
 
     threshold: 语音概率阈值（0~1），高于此算人声；越大越严格（保留更少人声、间隙更多）。
-    min_silence: 短于此（秒）的停顿不切断人声、并入语音区间，对应 silero 的
-        min_silence_duration_ms。语义同旧版 --min-silence（多短的停顿才算间隙）。
+    min_silence: 短于此（秒）的停顿不切断人声、并入同一区间，对应 silero 的
+        min_silence_duration_ms。调大可把「句内换气/顿挫」并进同一话语块、减少碎片。
+    max_speech: 单个语音区间的最长时长（秒），对应 silero 的 max_speech_duration_s。
+        超过则 silero 在区间内部的静音处自动断开，防止「窗口过长导致转录质量下降/多句黏连」。
+        None = 不限（silero 默认 inf）。
+    min_speech: 短于此（秒）的语音段直接丢弃（噪声兜底），对应 silero 的
+        min_speech_duration_ms。None = silero 默认（250ms）。
     device: 推理设备。None / "cpu" 走 CPU——**强烈建议 CPU**。silero VAD 是 LSTM，按 512
         采样点（32ms）一窗逐个推理，且隐状态在时间步上**串行依赖**（窗口 N 必须等窗口 N-1
         的 hidden state）——架构上无法沿时间轴并行 / 批处理，这是 GPU 跑不起来的**主因**；
@@ -106,10 +111,14 @@ class VADetector:
         self,
         threshold: float = 0.5,
         min_silence: float = 0.5,
+        max_speech: float | None = None,
+        min_speech: float | None = None,
         device: str | None = None,
     ):
         self.threshold = threshold
         self.min_silence = min_silence
+        self.max_speech = max_speech
+        self.min_speech = min_speech
         self.device = device
         self._model = None
 
@@ -134,10 +143,9 @@ class VADetector:
     ) -> list[tuple[float, float]]:
         """探出音频里的人声区间，返回 [(start, end), ...]（秒，按起点升序）。
 
-        人声区间有两个用途：① 取补集（speech_to_gaps）得非语音间隙，喂给
-        transcriber.plan_segments 作分段切点；② 直接作真实人声边界，给 subtitle 把
-        kotoba 虚高的 chunk end 夹回真实结束处（见 subtitle._flush 的 VAD 修正）。
-        故这里返回人声区间本身，由调用方各取所需。
+        调好 min_silence / max_speech / min_speech 后，silero 直接吐出「话语级」窗口：
+        逐窗口转录、以窗口起点做偏移锚点，可锚定真实人声边界、根治 kotoba 前导静音漂移。
+        （也可取补集 speech_to_gaps 得非语音间隙，或作真实边界给 subtitle 夹 chunk end。）
 
         progress 可选回调，silero 推理过程中按 0~100 的百分比回报进度（长音频 VAD 本身
         要扫全程、耗时可观，借此给调用方刷进度、避免看似卡死）。
@@ -149,6 +157,12 @@ class VADetector:
         audio = decode_pcm(audio_file, SAMPLING_RATE)
         if self.device and self.device != "cpu":
             audio = audio.to(self.device)
+        # 仅传显式设置的可选参数，未设则交给 silero 默认（max_speech_duration_s=inf 等）
+        kwargs: dict = {}
+        if self.max_speech is not None:
+            kwargs["max_speech_duration_s"] = self.max_speech
+        if self.min_speech is not None:
+            kwargs["min_speech_duration_ms"] = int(self.min_speech * 1000)
         # return_seconds=True：元素为 {"start": s, "end": e}（秒）
         speech = get_speech_timestamps(
             audio,
@@ -158,5 +172,6 @@ class VADetector:
             min_silence_duration_ms=int(self.min_silence * 1000),
             return_seconds=True,
             progress_tracking_callback=progress,
+            **kwargs,
         )
         return [(float(d["start"]), float(d["end"])) for d in speech]
