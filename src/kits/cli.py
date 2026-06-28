@@ -163,7 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-v",
         "--verbose",
         action="store_true",
-        help="显示底层库(transformers/onnxruntime 等)的调试日志，默认隐藏",
+        help="显示底层库(transformers/onnxruntime/audio-separator 等)的调试日志，默认隐藏",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -304,7 +304,7 @@ def _maybe_separate(audio_file: str, args: argparse.Namespace) -> str:
 
     print("\n🎚️  转录前预处理：分离人声")
     out_dir = str(Path(audio_file).parent)
-    kwargs: dict = {"output_dir": out_dir}
+    kwargs: dict = {"output_dir": out_dir, "verbose": getattr(args, "verbose", False)}
     if getattr(args, "separate_model", None):
         kwargs["model_filename"] = args.separate_model
     if getattr(args, "separate_segment_size", None) is not None:
@@ -533,6 +533,7 @@ def _run_separate(args: argparse.Namespace) -> None:
         "overlap": args.overlap,
         "segment_minutes": args.segment_minutes,
         "output_bitrate": args.output_bitrate,
+        "verbose": getattr(args, "verbose", False),
     }
     if args.model:
         kwargs["model_filename"] = args.model
