@@ -407,23 +407,20 @@ class Transcriber:
             raise RuntimeError("未获取到单词级时间戳，无法生成字幕")
         return words
 
-    def transcribe_segmented(
+    def plan_audio(
         self,
         audio_file: str,
-        language: str = "japanese",
-        beams: int = 3,
         target_chunk: float = 300.0,
         max_chunk: float = 600.0,
         vad_threshold: float = 0.5,
         min_silence: float = 0.5,
-        overlap: float = 2.0,
-        bar: object | None = None,
-    ) -> Iterator[list[Word]]:
-        """按语音间隙切分长音频，逐段转录并产出（已对齐全局时间轴的）词列表。
+    ) -> tuple[float, list[tuple[float, float]]]:
+        """规划分段：探总时长，长音频再用 VAD 探人声间隙、plan_segments 切段。
 
-        每段转完即 yield，调用方可据此显示进度、分批写盘。切点落在 VAD 探出的非语音
-        间隙中点，不打断语句，故精度与整段转录一致。短音频（<= max_chunk）退化为一次
-        整段转录。
+        返回 (duration, segments)。这是转录前的「规划阶段」，应在转录进度条创建**之前**
+        调用——VAD 模型加载与全程扫描耗时可观，放进度条之前跑完，其日志才不会冲乱进度条
+        （与 transcriber/punctuator 模型提前 load 同理）。故这里用普通 print 输出，含 VAD
+        百分比进度。短音频（<= max_chunk）跳过 VAD，直接返回单段 [(0, duration)]。
 
         切点来源：用 Silero VAD（见 kits.vad）探出人声区间、反推非语音间隙，交给
         plan_segments 在 (target_chunk, max_chunk) 窗口内挑最长间隙中点切。VAD 能区分
@@ -432,14 +429,65 @@ class Transcriber:
 
         vad_threshold: VAD 语音概率阈值（0~1），高于此算人声；越大越严格。
         min_silence: 短于此（秒）的停顿并入人声、不算间隙；越大间隙越少、段越接近整段。
+        """
+        duration = probe_duration(audio_file)
+        print(f"\n🎵 音频总时长: {duration:.1f}s（约 {duration / 60:.1f} 分钟）")
+
+        if duration <= max_chunk:
+            print("ℹ️  音频较短，整段转录。")
+            return duration, [(0.0, duration)]
+
+        # 用 VAD 探出人声间隙作为切点来源。VAD 固定走 CPU：silero VAD 是 LSTM，隐状态在
+        # 时间步上串行依赖（窗口 N 必须等窗口 N-1 的 hidden state），架构上无法沿时间轴
+        # 并行/批处理，放 GPU 反被同步 + kernel launch 开销拖垮、比 CPU 慢几个数量级
+        # （CPU ~119x 实时；silero 的 model.py 亦 set_num_threads(1)、官方建议跑 CPU）。
+        from kits.vad import VADetector
+
+        print(
+            f"🔍 VAD 探测人声间隙（threshold={vad_threshold}, min_silence={min_silence}s）"
+            f"，约需 {duration / 119 / 60:.1f} 分钟..."
+        )
+        detector = VADetector(
+            threshold=vad_threshold, min_silence=min_silence, device="cpu"
+        )
+        # VAD 要扫全程、长音频耗时可观，接 silero 的进度回调避免看似卡死。silero 每窗口
+        # （可达数十万次）都回调一次，节流到每 10% 打一行（进度条尚未创建，用普通 print）。
+        last_pct = [-1]
+
+        def _vad_progress(pct: float) -> None:
+            p = int(pct)
+            if p > last_pct[0] and p % 10 == 0:
+                last_pct[0] = p
+                print(f"  VAD 扫描 {p}%")
+
+        gaps = detector.detect_gaps(audio_file, duration, progress=_vad_progress)
+        print(f"  找到 {len(gaps)} 段非语音间隙")
+        segments = plan_segments(duration, gaps, target_chunk, max_chunk)
+        print(f"✂️  规划为 {len(segments)} 段")
+        return duration, segments
+
+    def transcribe_segments(
+        self,
+        audio_file: str,
+        segments: list[tuple[float, float]],
+        duration: float,
+        language: str = "japanese",
+        beams: int = 3,
+        overlap: float = 2.0,
+        bar: object | None = None,
+    ) -> Iterator[list[Word]]:
+        """按 plan_audio 预先规划好的 segments 逐段转录，流式产出（对齐全局时间轴的）词列表。
+
+        每段转完即 yield，调用方可据此显示进度、分批写盘。切点落在 VAD 探出的非语音
+        间隙中点，不打断语句，故精度与整段转录一致。单段（短音频）直接整段转原文件。
 
         overlap: 取数窗口在每段逻辑区间两侧各外扩的秒数（垫料），给模型在接缝处留
         上下文、避免把词/乐句切碎（鹿乃长时间唱歌时硬切尤甚）。转录后按「词中心落在
         本段逻辑区间」过滤，垫料区的词归相邻段，接缝无缝去重。逻辑区间本身仍无缝相接。
 
-        bar: 可选 tqdm 进度条实例。传入则日志走 tqdm.write()（自动让进度条钉在底部、
-        日志逐行上滚不冲突）、进度按已转录秒数推进（bar.total 设为音频总时长、每段
-        update 本段时长）；不传则退化为普通 print（向后兼容、便于无终端环境/测试）。
+        bar: 可选 tqdm 进度条实例，量程应已设为 duration（cli 在建条时传入）。传入则日志
+        走 tqdm.write()（自动让进度条钉在底部、日志逐行上滚不冲突）、进度按已转录秒数推进
+        （每段 update 本段时长）；不传则退化为普通 print（向后兼容、便于无终端环境/测试）。
         """
         # 日志分流：有进度条用 tqdm 的类方法 write()（自动避让进度条），否则普通 print
         def _emit(msg: str) -> None:
@@ -452,15 +500,9 @@ class Transcriber:
         if self._pipe is None:
             self.load()
 
-        duration = probe_duration(audio_file)
-        if bar is not None:
-            # 探到总时长后才能确定进度条满量程：按音频秒数推进
-            # noinspection PyUnresolvedReferences
-            bar.reset(total=duration)
-        _emit(f"🎵 音频总时长: {duration:.1f}s（约 {duration / 60:.1f} 分钟）")
-
-        if duration <= max_chunk:
-            _emit("ℹ️  音频较短，整段转录。")
+        total = len(segments)
+        # 单段（短音频）：直接整段转原文件，免切片重编码
+        if total == 1:
             words = self._transcribe_file(audio_file, language, beams)
             if words:
                 yield words
@@ -469,21 +511,7 @@ class Transcriber:
                 bar.update(duration - bar.n)  # 推到满
             return
 
-        # 用 VAD 探出人声间隙作为切点来源。VAD 跟随转录设备：CUDA 复用以提速，
-        # 其余（CPU/MPS）走 CPU——MPS 上 silero jit 兼容性不稳，且 VAD 本身极轻量。
-        from kits.vad import VADetector
-
-        vad_device = "cuda" if self.device == "cuda" else "cpu"
-        _emit(f"🔍 VAD 探测人声间隙（threshold={vad_threshold}, min_silence={min_silence}s）...")
-        detector = VADetector(
-            threshold=vad_threshold, min_silence=min_silence, device=vad_device
-        )
-        gaps = detector.detect_gaps(audio_file, duration)
-        _emit(f"  找到 {len(gaps)} 段非语音间隙")
-        segments = plan_segments(duration, gaps, target_chunk, max_chunk)
-        _emit(f"✂️  规划为 {len(segments)} 段，开始分段转录（重叠区域 {overlap:.1f}s）")
-
-        total = len(segments)
+        _emit(f"🎬 开始分段转录（{total} 段，重叠区域 {overlap:.1f}s）")
         with tempfile.TemporaryDirectory(prefix="kits_seg_") as tmp:
             tmp_dir = Path(tmp)
             for i, (start, end) in enumerate(segments, 1):

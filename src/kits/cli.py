@@ -322,9 +322,9 @@ def _maybe_separate(audio_file: str, args: argparse.Namespace) -> str:
 def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) -> list[Sentence]:
     """转录音频并写出 SRT。延迟导入 transcriber 以避免无谓加载 GPU 栈。
 
-    长音频按静音切分、分段转录，每段转完即断句并追加写盘（边转边出、可显示进度，
-    中途中断时已写部分仍是合法 SRT）。切点落在静音处，不打断语句。
-    若开启 --separate，先分离人声再转录。
+    先用 VAD 规划分段（plan_audio），再逐段转录、每段转完即断句并追加写盘（边转边出、
+    可显示进度，中途中断时已写部分仍是合法 SRT）。切点落在 VAD 探出的人声间隙处，不打断
+    语句。若开启 --separate，先分离人声再转录。
     """
     from kits.transcriber import Transcriber
 
@@ -362,18 +362,26 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
     if punctuator is not None:
         punctuator.load()
 
-    # 进度条按音频秒数推进：先建空条（量程未知），transcribe_segmented 探到总时长后
-    # 会 reset(total=duration)。段号/累计条数收进进度条 desc/postfix，不再刷屏。
-    bar = _make_bar(total=None, desc="🎬 转录进度", unit="s")
+    # 规划阶段：探时长 + （长音频）VAD 扫描 + 分段，在进度条创建之前完成。VAD 模型加载与
+    # 全程扫描耗时可观，放进度条之前跑完，其日志才不会冲乱进度条（与模型提前 load 同理）。
+    duration, segments = transcriber.plan_audio(
+        audio_file,
+        target_chunk=args.target_chunk,
+        max_chunk=args.max_chunk,
+        vad_threshold=args.vad_threshold,
+        min_silence=args.min_silence,
+    )
+
+    # 转录进度条按音频秒数推进，量程已知（plan_audio 已探得 duration），直接满量程建条。
+    # 段号/累计条数收进进度条 desc/postfix，不再刷屏。
+    bar = _make_bar(total=duration, desc="🎬 转录进度", unit="s")
     with SrtWriter(output_srt) as writer, bar:
-        segments_words = transcriber.transcribe_segmented(
+        segments_words = transcriber.transcribe_segments(
             audio_file,
+            segments,
+            duration,
             language=args.language,
             beams=args.beams,
-            target_chunk=args.target_chunk,
-            max_chunk=args.max_chunk,
-            vad_threshold=args.vad_threshold,
-            min_silence=args.min_silence,
             overlap=args.segment_overlap,
             bar=bar,
         )
