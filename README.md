@@ -42,7 +42,7 @@ _鹿乃 Twitch 直播智能总结_
 
 - **一条龙流水线** — 从直播 URL 到中文字幕、AI 总结，全程命令行串联，无需手动倒腾中间文件。
 - **日语识别更准** — 默认 [kotoba-whisper-v2.2](https://huggingface.co/kotoba-tech/kotoba-whisper-v2.2) 蒸馏模型，自动补日语句读后再断句，字幕是完整句子而非碎片。
-- **句子完整不截断** — 长音频按静音切分、分段流式转写，切点落在无人说话处，边转边落盘，精度与整段转写一致。
+- **句子完整不截断** — 长音频用 Silero VAD 探出人声间隙、分段流式转写，切点落在无人说话处，边转边落盘，精度与整段转写一致。
 - **唱歌场次友好** — 内置 audio-separator 人声分离，长音频自动切段防爆内存、输出比特率对齐原音频，去掉 BGM / 伴奏再识别。
 - **省心的中文化** — AI 逐条翻译保留时间轴，并能按时间线 / 概述 / 高光 / 歌单等预设一键总结整场直播。
 - **专为 50 系显卡调优，兼顾 Apple Silicon** — Nvidia 走 `pytorch-cu128`（CUDA 12.8），onnxruntime 复用 torch 自带 CUDA 运行时，开箱即用 GPU 加速；macOS（M 系列）自动切到 MPS 加速栈。
@@ -54,7 +54,7 @@ _鹿乃 Twitch 直播智能总结_
 - 🎤 使用 Whisper 进行语音识别，默认 `kotoba-whisper-v2.2`（日语识别更准的蒸馏模型）
 - ✂️ 句子级断句，按句末标点 / 停顿 / 长度上限智能切分，保证句子完整不被拦腰截断
 - ✒️ 蒸馏模型只产短语级时间戳且不带标点，自动用标点模型补日语句读（。！？）后再断句，时间戳原样保留
-- 🪓 长音频**按静音切分、分段流式转录**：实时进度、边转边写盘，切点落在无人说话处，精度不受影响
+- 🪓 长音频**按 VAD 人声间隙切分、分段流式转录**：实时进度、边转边写盘，切点落在无人说话处，精度不受影响
 - 🔗 下载与字幕一条龙：一条命令从直播 URL 直达 SRT 字幕
 - 🌐 调用大模型把日语 SRT 翻译成中文 SRT，逐条对应、保留原时间轴（默认 DeepSeek，可接其他 OpenAI 兼容端点）
 - 🤖 调用大模型对 SRT 字幕做 AI 总结，提示词走 JSON 预设（时间线 / 概述 / 高光 / 歌单），长字幕自动分块（默认 DeepSeek，可接其他 OpenAI 兼容端点）
@@ -188,9 +188,9 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | `--max-chars` | `60` | 单条字幕最大字符数 |
 | `--max-duration` | `15.0` | 单条字幕最大时长（秒） |
 | `--target-chunk` | `300.0` | 分段目标时长（秒），长音频每段约这么长 |
-| `--max-chunk` | `600.0` | 单段硬上限（秒），段内无静音时在此强切 |
-| `--silence-db` | `-45.0` | 静音判定响度阈值（dB），音量低于此值算静音；越负越严格（检出静音更少），越接近 0 越宽松 |
-| `--min-silence` | `0.5` | 最短静音时长（秒），短于此不算切点 |
+| `--max-chunk` | `600.0` | 单段硬上限（秒），段内无人声间隙时在此强切 |
+| `--vad-threshold` | `0.5` | VAD 语音概率阈值（0~1），高于此算人声；越大越严格（检出人声更少、间隙更多） |
+| `--min-silence` | `0.5` | 短于此（秒）的停顿并入人声、不算切点间隙；越大间隙越少、段越接近整段 |
 | `--filter-game` | 关闭 | 剔除指定游戏的播报 / 技能语音，按游戏名启用、可多次指定（整条完全匹配才删） |
 | `--separate` | 关闭 | 转录前先用 audio-separator 分离人声（去 BGM / 唱歌干扰，需安装 audio-separator + GPU） |
 | `--separate-model` | `UVR-MDX-NET_Main_427.onnx` | 人声分离模型文件名，仅在 `--separate` 时生效 |
@@ -235,13 +235,13 @@ uv run kits subtitle -i live.mp3 --no-punctuate
 
 音频时长超过 `--max-chunk`（默认 10 分钟）时，会自动启用分段转录：
 
-1. 先用 ffmpeg `silencedetect` 探测全部静音区间
-2. 从每段起点出发累积到 `--target-chunk`（默认 5 分钟），在其后**第一个静音中点**处切开；若到 `--max-chunk` 仍无静音可切（如长时间唱歌 / BGM），则在硬上限处强切兜底
+1. 先用 **Silero VAD** 探出全部人声区间，反推出非语音间隙
+2. 从每段起点出发累积到 `--target-chunk`（默认 5 分钟），在其后窗口内**时长最长的人声间隙中点**处切开；若到 `--max-chunk` 仍无间隙可切（极端情况，如整段连续人声），则在硬上限处强切兜底
 3. 逐段切出临时音频 → 转录 → 该段字幕**立即追加写入 SRT**
 
 好处：实时显示 `转录第 i/N 段` 进度、边转边落盘（中途中断已转部分仍是合法 SRT）、峰值显存更低。切点都落在无人说话处，**不会把句子拦腰截断，精度与整段转录一致**。短音频则自动整段转录，无额外开销。
 
-> 鹿乃直播常有唱歌 / BGM，这些不是静音，若某段一直有声音会触发硬上限强切。可调大 `--silence-db`（往接近 0 调，如 `-35`）放宽静音判定，或调大 `--max-chunk` 容忍更长的段。
+> VAD 能区分「人声 vs 音乐/噪音」，鹿乃直播常有唱歌 / BGM，这些虽不是静音，VAD 仍能在其间找到真正的人声间隙下刀，切点质量优于纯音量阈值。若想让某段更易切开，可调小 `--vad-threshold`（更易判为人声、间隙更集中）或调大 `--max-chunk` 容忍更长的段。VAD 跟随转录设备：CUDA 上复用 GPU 提速，其余走 CPU（极轻量）。
 
 #### 剔除游戏播报（--filter-game）
 
@@ -417,7 +417,8 @@ src/kits/
   subtitle.py      # 纯逻辑：单词时间戳 -> 完整句子 -> SRT，含 SRT 解析与增量写入（无 torch 依赖，可单测）
   filters.py       # 纯逻辑：剔除游戏内系统播报 / 技能语音（无 torch 依赖，可单测）
   llm.py           # 公共 OpenAI 兼容 LLM 客户端：base_url + 鉴权 + HTTP + 错误处理（仅 httpx，translate/sum 共用）
-  transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按静音切分、分段流式产出 chunk 级时间戳
+  transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按 VAD 人声间隙切分、分段流式产出 chunk 级时间戳
+  vad.py           # 语音活动检测：Silero VAD 探人声区间、反推非语音间隙作切点（延迟导入 torch/silero-vad）
   punctuator.py    # 标点恢复：给无标点的转录 chunk 补日语句读（延迟导入 punctuators），时间戳不变
   downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
   translator.py    # 把日语 SRT 翻译成中文 SRT（经 llm 客户端，默认 DeepSeek）
@@ -432,7 +433,8 @@ main.py            # 薄入口，委托给 kits.cli
 各模块职责清晰、相互解耦:
 
 - `downloader.TwitchDownloader` 下载并合并直播，产出 MP4 / MP3，不依赖 torch
-- `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；`transcribe_segmented()` 按静音切分长音频、分段流式产出
+- `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；`transcribe_segmented()` 按 VAD 人声间隙切分长音频、分段流式产出
+- `vad.VADetector.detect_gaps()` 用 Silero VAD 探人声区间、反推非语音间隙喂给分段规划（延迟导入重依赖）
 - `punctuator.Punctuator.restore()` 给无标点的 chunk 补日语句读，时间戳不变（延迟导入重依赖）
 - `subtitle.segment_sentences()` 负责断句、`write_srt()` / `SrtWriter` 负责落盘（后者支持分段增量写）、`parse_srt()` 负责把 SRT 读回句子列表
 - `llm.LLMClient` 集中 OpenAI 兼容端点的鉴权与请求（默认 DeepSeek，可配 `--base-url`）；`translator.LLMTranslator` 与 `summarizer.Summarizer` 复用它

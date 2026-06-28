@@ -10,7 +10,7 @@ import pytest
 
 from kits.transcriber import (
     _keep_core_words,
-    _longest_silence_midpoint,
+    _longest_gap_midpoint,
     _shift_words,
     _word_center,
     plan_segments,
@@ -71,47 +71,17 @@ class TestPlanSegments:
         assert segments[0] == (0.0, 315.0)
 
     def test_hard_limit_when_no_silence(self):
-        # 软下限到硬上限间无静音（如长时间唱歌），在硬上限强切
+        # 软下限到硬上限间无间隙（如整段连续人声），在硬上限强切
         segments = plan_segments(1000.0, [], target_chunk=300.0, max_chunk=600.0)
         assert segments[0] == (0.0, 600.0)
         assert segments[1][0] == 600.0
 
     def test_ignores_silence_before_soft_limit(self):
-        # 软下限(300)之前的静音不作为切点
+        # 软下限(300)之前的间隙不作为切点
         silences = [(100.0, 105.0), (400.0, 410.0)]
         segments = plan_segments(700.0, silences, target_chunk=300.0, max_chunk=600.0)
         # 应在 405 处切，而非 102.5
         assert segments[0] == (0.0, 405.0)
-
-    def test_fallback_none_preserves_original_behavior(self):
-        # fallback_silences 默认 None：无静音时仍在硬上限强切（原契约不变）
-        segments = plan_segments(1000.0, [], target_chunk=300.0, max_chunk=600.0)
-        assert segments[0] == (0.0, 600.0)
-
-    def test_fallback_used_before_hard_cut(self):
-        # 严格阈值无静音、但宽松候选在 (300,600) 有中点 (440+460)/2=450 → 用它而非硬切 600
-        fb = [(440.0, 460.0)]
-        segments = plan_segments(
-            1000.0, [], target_chunk=300.0, max_chunk=600.0, fallback_silences=fb
-        )
-        assert segments[0] == (0.0, 450.0)
-
-    def test_fallback_outside_window_falls_back_to_hard_cut(self):
-        # 宽松候选都不在 (300,600) 区间内 → 仍硬切在 600
-        fb = [(100.0, 110.0), (700.0, 710.0)]
-        segments = plan_segments(
-            1000.0, [], target_chunk=300.0, max_chunk=600.0, fallback_silences=fb
-        )
-        assert segments[0] == (0.0, 600.0)
-
-    def test_strict_silence_preferred_over_fallback(self):
-        # 严格阈值已有候选(315)时，不动用宽松候选
-        strict = [(310.0, 320.0)]
-        fb = [(340.0, 360.0)]
-        segments = plan_segments(
-            700.0, strict, target_chunk=300.0, max_chunk=600.0, fallback_silences=fb
-        )
-        assert segments[0] == (0.0, 315.0)
 
     def test_picks_longest_silence_not_first(self):
         # 窗口(300,600)内有 3 段静音：310(停4s) / 450(停20s) / 520(停2s)
@@ -127,24 +97,24 @@ class TestPlanSegments:
         assert segments[0] == (0.0, 350.0)
 
 
-class TestLongestSilenceMidpoint:
+class TestLongestGapMidpoint:
     def test_returns_longest_in_window(self):
         sil = [(310.0, 314.0), (400.0, 420.0), (500.0, 505.0)]
-        assert _longest_silence_midpoint(sil, 300.0, 600.0) == 410.0
+        assert _longest_gap_midpoint(sil, 300.0, 600.0) == 410.0
 
     def test_excludes_out_of_window(self):
-        # 窗口外的更长静音不算；窗口内只有 350 合格
+        # 窗口外的更长间隙不算；窗口内只有 350 合格
         sil = [(100.0, 200.0), (348.0, 352.0)]
-        assert _longest_silence_midpoint(sil, 300.0, 600.0) == 350.0
+        assert _longest_gap_midpoint(sil, 300.0, 600.0) == 350.0
 
     def test_none_when_empty_window(self):
         sil = [(100.0, 150.0), (700.0, 760.0)]
-        assert _longest_silence_midpoint(sil, 300.0, 600.0) is None
+        assert _longest_gap_midpoint(sil, 300.0, 600.0) is None
 
     def test_boundary_is_exclusive(self):
         # 中点正好落在 lo 或 hi 上不算（区间开）
         sil = [(295.0, 305.0)]  # 中点 300 == lo
-        assert _longest_silence_midpoint(sil, 300.0, 600.0) is None
+        assert _longest_gap_midpoint(sil, 300.0, 600.0) is None
 
 
 class TestShiftWords:

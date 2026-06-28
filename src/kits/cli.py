@@ -75,16 +75,18 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
     # 长音频分段转录（按静音切分）。短音频会自动整段转录。
     parser.add_argument("--target-chunk", type=float, default=300.0, help="分段目标时长(秒)")
     parser.add_argument("--max-chunk", type=float, default=600.0, help="单段硬上限时长(秒)")
-    parser.add_argument("--silence-db", type=float, default=-45.0, help="静音判定响度阈值(dB)，越负越严格")
     parser.add_argument(
-        "--fallback-db",
+        "--vad-threshold",
         type=float,
-        default=-35.0,
-        help="二次宽松静音阈值(dB)，应比 --silence-db 更宽松(更接近0)；"
-        "严格阈值在某段探不到静音、本会硬切时改用它找次优切点，把硬切降为最后兜底。"
-        "<= --silence-db 则关闭二次探测",
+        default=0.5,
+        help="VAD 语音概率阈值(0~1)，高于此算人声；越大越严格(检出人声更少、间隙更多)。默认 0.5",
     )
-    parser.add_argument("--min-silence", type=float, default=0.5, help="最短静音时长(秒)")
+    parser.add_argument(
+        "--min-silence",
+        type=float,
+        default=0.5,
+        help="短于此(秒)的停顿并入人声、不算切点间隙；越大间隙越少、段越接近整段。默认 0.5",
+    )
     parser.add_argument(
         "--segment-overlap",
         type=float,
@@ -370,10 +372,9 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
             beams=args.beams,
             target_chunk=args.target_chunk,
             max_chunk=args.max_chunk,
-            noise_db=args.silence_db,
+            vad_threshold=args.vad_threshold,
             min_silence=args.min_silence,
             overlap=args.segment_overlap,
-            fallback_db=args.fallback_db,
             bar=bar,
         )
         for words in segments_words:
