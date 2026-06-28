@@ -415,18 +415,20 @@ class Transcriber:
         vad_threshold: float = 0.5,
         min_silence: float = 0.5,
         make_bar: Callable[..., object] | None = None,
-    ) -> tuple[float, list[tuple[float, float]]]:
-        """规划分段：探总时长，长音频再用 VAD 探人声间隙、plan_segments 切段。
+    ) -> tuple[float, list[tuple[float, float]], list[tuple[float, float]]]:
+        """规划分段：探总时长，长音频再用 VAD 探人声区间、plan_segments 切段。
 
-        返回 (duration, segments)。这是转录前的「规划阶段」，应在转录进度条创建**之前**
-        调用——VAD 模型加载与全程扫描耗时可观，放进度条之前跑完，其日志才不会冲乱进度条
-        （与 transcriber/punctuator 模型提前 load 同理）。短音频（<= max_chunk）跳过 VAD，
-        直接返回单段 [(0, duration)]。
+        返回 (duration, segments, speech)。speech 是 VAD 探出的人声区间 [(s,e),...]（秒，
+        全局时间轴），有两用：① plan_segments 用其补集（非语音间隙）定切点；② 透传给
+        subtitle.segment_sentences，把 kotoba 虚高的 chunk end 夹回真实人声边界。
 
-        切点来源：用 Silero VAD（见 kits.vad）探出人声区间、反推非语音间隙，交给
-        plan_segments 在 (target_chunk, max_chunk) 窗口内挑最长间隙中点切。VAD 能区分
-        「人声 vs 音乐/噪音」，鹿乃长时间唱歌 / BGM 时也能找到真正的人声间隙，切点质量
-        优于旧版纯音量阈值（silencedetect）。
+        这是转录前的「规划阶段」，应在转录进度条创建**之前**调用——VAD 模型加载与全程
+        扫描耗时可观，放进度条之前跑完，其日志才不会冲乱进度条（与 transcriber/punctuator
+        模型提前 load 同理）。短音频（<= max_chunk）跳过 VAD，返回单段 + 空 speech。
+
+        切点来源：VAD 探出人声区间、反推非语音间隙，交给 plan_segments 在
+        (target_chunk, max_chunk) 窗口内挑最长间隙中点切。VAD 能区分「人声 vs 音乐/噪音」，
+        鹿乃长时间唱歌 / BGM 时也能找到真正的人声间隙，切点质量优于旧版纯音量阈值。
 
         vad_threshold: VAD 语音概率阈值（0~1），高于此算人声；越大越严格。
         min_silence: 短于此（秒）的停顿并入人声、不算间隙；越大间隙越少、段越接近整段。
@@ -439,16 +441,16 @@ class Transcriber:
 
         if duration <= max_chunk:
             print("ℹ️  音频较短，整段转录。")
-            return duration, [(0.0, duration)]
+            return duration, [(0.0, duration)], []
 
-        # 用 VAD 探出人声间隙作为切点来源。VAD 固定走 CPU：silero VAD 是 LSTM，隐状态在
-        # 时间步上串行依赖（窗口 N 必须等窗口 N-1 的 hidden state），架构上无法沿时间轴
-        # 并行/批处理，放 GPU 反被同步 + kernel launch 开销拖垮、比 CPU 慢几个数量级
-        # （CPU ~119x 实时；silero 的 model.py 亦 set_num_threads(1)、官方建议跑 CPU）。
-        from kits.vad import VADetector
+        # 用 VAD 探出人声区间。VAD 固定走 CPU：silero VAD 是 LSTM，隐状态在时间步上串行
+        # 依赖（窗口 N 必须等窗口 N-1 的 hidden state），架构上无法沿时间轴并行/批处理，
+        # 放 GPU 反被同步 + kernel launch 开销拖垮、比 CPU 慢几个数量级（CPU ~119x 实时；
+        # silero 的 model.py 亦 set_num_threads(1)、官方建议跑 CPU）。
+        from kits.vad import VADetector, speech_to_gaps
 
         print(
-            f"🔍 VAD 探测人声间隙（threshold={vad_threshold}, min_silence={min_silence}s）"
+            f"🔍 VAD 探测人声区间（threshold={vad_threshold}, min_silence={min_silence}s）"
             f"，约需 {duration / 119 / 60:.1f} 分钟..."
         )
         detector = VADetector(
@@ -478,15 +480,16 @@ class Transcriber:
             last_pct[0] = p
 
         try:
-            gaps = detector.detect_gaps(audio_file, duration, progress=_vad_progress)
+            speech = detector.detect_speech(audio_file, progress=_vad_progress)
         finally:
             if vad_bar is not None:
                 # noinspection PyUnresolvedReferences
                 vad_bar.close()
-        print(f"  找到 {len(gaps)} 段非语音间隙")
+        gaps = speech_to_gaps(speech, duration)
+        print(f"  找到 {len(speech)} 段人声、{len(gaps)} 段非语音间隙")
         segments = plan_segments(duration, gaps, target_chunk, max_chunk)
         print(f"✂️  规划为 {len(segments)} 段")
-        return duration, segments
+        return duration, segments, speech
 
     def transcribe_segments(
         self,

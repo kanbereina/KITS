@@ -127,16 +127,18 @@ class VADetector:
             self._model.to(self.device)
         print("✅ VAD 模型加载完成")
 
-    def detect_gaps(
+    def detect_speech(
         self,
         audio_file: str,
-        duration: float,
         progress: Callable[[float], None] | None = None,
     ) -> list[tuple[float, float]]:
-        """探出音频人声区间，返回其补集——非语音间隙 [(start, end), ...]（秒）。
+        """探出音频里的人声区间，返回 [(start, end), ...]（秒，按起点升序）。
 
-        间隙与 transcriber.plan_segments 期望的「静音区间」同构，可直接喂入分段规划。
-        duration 为音频总时长（秒，调用方已 probe，避免重复探测），用于补出末尾间隙。
+        人声区间有两个用途：① 取补集（speech_to_gaps）得非语音间隙，喂给
+        transcriber.plan_segments 作分段切点；② 直接作真实人声边界，给 subtitle 把
+        kotoba 虚高的 chunk end 夹回真实结束处（见 subtitle._flush 的 VAD 修正）。
+        故这里返回人声区间本身，由调用方各取所需。
+
         progress 可选回调，silero 推理过程中按 0~100 的百分比回报进度（长音频 VAD 本身
         要扫全程、耗时可观，借此给调用方刷进度、避免看似卡死）。
         """
@@ -157,5 +159,4 @@ class VADetector:
             return_seconds=True,
             progress_tracking_callback=progress,
         )
-        intervals = [(float(d["start"]), float(d["end"])) for d in speech]
-        return speech_to_gaps(intervals, duration)
+        return [(float(d["start"]), float(d["end"])) for d in speech]

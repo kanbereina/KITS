@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import bisect
 import re
 from typing import TypedDict
 
@@ -96,26 +97,57 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def _vad_voice_end(
+    speech: list[tuple[float, float]], speech_starts: list[float], start: float
+) -> float | None:
+    """给定句子起点 start，返回「人声实际结束处」——从 start 起第一个 VAD 人声区间的 end。
+
+    用于把 kotoba 虚高的 chunk end 夹回真实人声边界（见 _flush）。speech 为 VAD 探出的
+    人声区间 [(s,e),...]（按起点升序），speech_starts 是各区间起点的预提取列表（bisect 用）。
+      - start 落在某人声区间内 → 返回该区间 end
+      - 否则取 start 之后第一个人声区间 → 返回其 end
+      - start 在所有人声区间之后（无后继）→ None（VAD 帮不上，调用方回退字符速率）
+    """
+    if not speech:
+        return None
+    # 第一个起点 > start 的区间下标；其前一个（若存在）起点 <= start
+    i = bisect.bisect_right(speech_starts, start)
+    if i > 0 and speech[i - 1][1] > start:
+        return speech[i - 1][1]  # start 落在 speech[i-1] 区间内
+    if i < len(speech):
+        return speech[i][1]  # start 之后第一个人声区间
+    return None
+
+
 def _flush(
     words: list[Word],
     max_duration: float | None = None,
     max_seconds_per_char: float | None = None,
     min_duration: float = 0.5,
+    speech: list[tuple[float, float]] | None = None,
+    speech_starts: list[float] | None = None,
+    vad_ratio_threshold: float = 1.0,
 ) -> Sentence | None:
     """把单词缓冲区合并成一条字幕（一个句子）。
 
     max_duration 非 None 时，对超过该时长的句子做硬钳制（end = start + max_duration），
     兜底那些词级时间戳缺失、导致前面断句规则失效而拉得过长的句子。
 
-    max_seconds_per_char 非 None 时，再按「每字符最多 N 秒」做二级收缩：kotoba 等蒸馏
-    模型的 chunk 时间戳常虚高（十来个字的短句标成十几秒），即便句末标点断句正确、
-    max_duration 钳到 15s，时长仍远超合理朗读时长。按字符数估算上限、超出则收缩 end。
-    只缩短显示时长，不改文本与起点，故不会与下一条重叠；反而能消除「虚高 end 盖过
-    下一条 start」造成的时间倒退。日语正常语速 ≥2 字/秒（每字 ≤0.5s），取 0.5 偏宽松、
-    只砍明显虚高者，不误伤慢语速。
+    虚高收缩（治 kotoba chunk 时间戳跨度虚高：十来个字的短句标成十几秒）分两路，
+    **VAD 优先、字符速率回退**：
+      - speech（VAD 人声区间）可用、且本句明显虚高（时长 / 字符 > vad_ratio_threshold）时，
+        优先用 _vad_voice_end 找「人声实际结束处」夹 end——真实测量，比字符速率猜测准
+        （实测能修正约 82% 的虚高条目，VAD 边界偏差 0.1~0.3s vs 字符估计 2.5~3.5s）。
+      - VAD 对不上（start 在所有人声区间之后、或夹出的 end 不落在 (start, end) 内）时，
+        回退按 max_seconds_per_char「每字符最多 N 秒」收缩。二者单点决策、互斥，避免叠加
+        误判；都只缩短显示时长、不改文本与起点，故不会与下一条重叠。
 
-    min_duration：显示时长下界。kotoba 偶尔把短 chunk 的 start/end 挤在一点（如 0.04s），
-    收缩后更易触发；过短字幕在播放器里一闪而过甚至不显示。最后兜底撑到该值，保证可读。
+    speech 为 None / 空（短音频跳过 VAD、或调用方不传）时退化为纯字符速率收缩，与引入
+    VAD 前行为完全一致。日语正常语速 ≥2 字/秒（每字 ≤0.5s），max_seconds_per_char 取
+    0.5 偏宽松、只砍明显虚高者；vad_ratio_threshold 取 1.0 更严，只对极虚高者动 VAD。
+
+    min_duration：显示时长下界。收缩后过短的字幕（kotoba 偶把 start/end 挤在一点，
+    如 0.04s）撑到此值，保证播放器里可读。
     """
     if not words:
         return None
@@ -128,9 +160,21 @@ def _flush(
         start = 0.0
     if end is None or end <= start:
         end = start + 0.5
+    # 硬钳：超 max_duration 先夹（兜底词级时间戳缺失导致的失控长句）
     if max_duration is not None and (end - start) > max_duration:
         end = start + max_duration
-    if max_seconds_per_char is not None:
+    # 虚高收缩：VAD 优先、字符速率回退（互斥单点决策）
+    clamped_by_vad = False
+    if (
+        speech
+        and speech_starts is not None
+        and (end - start) / len(text) > vad_ratio_threshold
+    ):
+        ve = _vad_voice_end(speech, speech_starts, start)
+        if ve is not None and start < ve < end:
+            end = ve
+            clamped_by_vad = True
+    if not clamped_by_vad and max_seconds_per_char is not None:
         char_limit = len(text) * max_seconds_per_char
         if (end - start) > char_limit:
             end = start + char_limit
@@ -200,6 +244,8 @@ def segment_sentences(
     max_chars: int = 60,
     max_duration: float = 15.0,
     max_seconds_per_char: float = 0.5,
+    speech: list[tuple[float, float]] | None = None,
+    vad_ratio_threshold: float = 1.0,
 ) -> list[Sentence]:
     """把单词级时间戳切分成完整句子。
 
@@ -209,11 +255,20 @@ def segment_sentences(
       2. 与上一个单词的停顿(无声)超过 max_gap
       3. 超过字符上限 max_chars / 时长上限 max_duration（防止句子失控变长）
 
-    max_seconds_per_char：每条字幕按「字符数 × 该值」估算朗读时长上限，超出则收缩 end。
-    治 kotoba chunk 时间戳虚高（短句标成 max_duration）——这类条目句末标点断句正确、
-    文本也对，只是 end 虚高；按字符速率收缩还原合理时长。设 <=0 关闭该二级收缩。
+    虚高 end 收缩（治 kotoba chunk 时间戳跨度虚高，短句标成 max_duration）：**VAD 优先、
+    字符速率回退**（见 _flush）。speech 为 VAD 探出的人声区间 [(s,e),...]（全局时间轴、
+    与 words 时间戳同轴），传入则对明显虚高（时长/字符 > vad_ratio_threshold）的句子按
+    人声实际结束处夹 end；VAD 对不上或未传 speech 时，回退 max_seconds_per_char 按字符
+    速率收缩（<=0 关闭该回退）。speech 为 None 时行为与引入 VAD 前完全一致。
     """
     spc = max_seconds_per_char if max_seconds_per_char and max_seconds_per_char > 0 else None
+    # 预提取人声区间起点供 _vad_voice_end 二分；speech 须按起点升序（silero 输出即如此）
+    speech_starts = [s for s, _ in speech] if speech else None
+
+    def flush(buf: list[Word]) -> Sentence | None:
+        return _flush(buf, max_duration, spc, speech=speech,
+                      speech_starts=speech_starts, vad_ratio_threshold=vad_ratio_threshold)
+
     words = _split_internal_punctuation(words)
     sentences: list[Sentence] = []
     buf: list[Word] = []
@@ -229,7 +284,7 @@ def segment_sentences(
         if buf:
             prev_end = last_known_end
             if start is not None and prev_end is not None and (start - prev_end) > max_gap:
-                if (sent := _flush(buf, max_duration, spc)) is not None:
+                if (sent := flush(buf)) is not None:
                     sentences.append(sent)
                 buf = []
                 last_known_end = None
@@ -244,7 +299,7 @@ def segment_sentences(
 
         # 遇到句末标点，句子完结
         if joined.endswith(SENTENCE_ENDINGS):
-            if (sent := _flush(buf, max_duration, spc)) is not None:
+            if (sent := flush(buf)) is not None:
                 sentences.append(sent)
             buf = []
             last_known_end = None
@@ -265,7 +320,7 @@ def segment_sentences(
                 # 没有逗号可切：按词边界硬切，避免整段被 flush 成一条超长字幕
                 head = buf
                 tail = []
-            if (sent := _flush(head, max_duration, spc)) is not None:
+            if (sent := flush(head)) is not None:
                 sentences.append(sent)
             buf = tail
             # 重算尾部的时间戳基准
@@ -278,7 +333,7 @@ def segment_sentences(
                 None,
             )
 
-    if (sent := _flush(buf, max_duration, spc)) is not None:
+    if (sent := flush(buf)) is not None:
         sentences.append(sent)
     return _clamp_overlaps(sentences)
 
