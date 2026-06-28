@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 
 __all__ = ["VADetector", "decode_pcm", "speech_to_gaps"]
 
@@ -93,8 +94,12 @@ class VADetector:
     threshold: 语音概率阈值（0~1），高于此算人声；越大越严格（保留更少人声、间隙更多）。
     min_silence: 短于此（秒）的停顿不切断人声、并入语音区间，对应 silero 的
         min_silence_duration_ms。语义同旧版 --min-silence（多短的停顿才算间隙）。
-    device: 推理设备。None / "cpu" 走 CPU（轻量、稳妥、不抢转录显存）；CUDA 时可传 "cuda"
-        加速（长音频解码出的张量较大，但模型极小）。MPS 兼容性不稳，调用方应回落 CPU。
+    device: 推理设备。None / "cpu" 走 CPU——**强烈建议 CPU**。silero VAD 是 LSTM，按 512
+        采样点（32ms）一窗逐个推理，且隐状态在时间步上**串行依赖**（窗口 N 必须等窗口 N-1
+        的 hidden state）——架构上无法沿时间轴并行 / 批处理，这是 GPU 跑不起来的**主因**；
+        逐窗口的 CPU↔GPU 同步 + kernel launch 开销是次因。两者叠加令长音频（4 小时 ≈ 47 万
+        窗口）在 GPU 上比 CPU 慢几个数量级。silero 的 model.py 亦 set_num_threads(1)、官方
+        建议跑 CPU（每窗口 <1ms，实测 ~119x 实时）。故 transcriber 固定传 "cpu"。
     """
 
     def __init__(
@@ -122,11 +127,18 @@ class VADetector:
             self._model.to(self.device)
         print("✅ VAD 模型加载完成")
 
-    def detect_gaps(self, audio_file: str, duration: float) -> list[tuple[float, float]]:
+    def detect_gaps(
+        self,
+        audio_file: str,
+        duration: float,
+        progress: Callable[[float], None] | None = None,
+    ) -> list[tuple[float, float]]:
         """探出音频人声区间，返回其补集——非语音间隙 [(start, end), ...]（秒）。
 
         间隙与 transcriber.plan_segments 期望的「静音区间」同构，可直接喂入分段规划。
         duration 为音频总时长（秒，调用方已 probe，避免重复探测），用于补出末尾间隙。
+        progress 可选回调，silero 推理过程中按 0~100 的百分比回报进度（长音频 VAD 本身
+        要扫全程、耗时可观，借此给调用方刷进度、避免看似卡死）。
         """
         from silero_vad import get_speech_timestamps
 
@@ -143,6 +155,7 @@ class VADetector:
             sampling_rate=SAMPLING_RATE,
             min_silence_duration_ms=int(self.min_silence * 1000),
             return_seconds=True,
+            progress_tracking_callback=progress,
         )
         intervals = [(float(d["start"]), float(d["end"])) for d in speech]
         return speech_to_gaps(intervals, duration)

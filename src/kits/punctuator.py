@@ -55,7 +55,7 @@ class Punctuator:
             ) from e
         print(f"\n✒️  加载标点恢复模型: {self.model_id}")
         self._model = PunctCapSegModelONNX.from_pretrained(self.model_id)
-        print("✅ 标点模型加载完成\n")
+        print("✅ 标点模型加载完成")
 
     @staticmethod
     def _needs_punctuation(text: str) -> bool:
