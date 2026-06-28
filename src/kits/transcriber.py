@@ -19,14 +19,14 @@
 产出单词级时间戳列表（list[Word]），交给 kits.subtitle 断句生成 SRT。
 模型转录文本同样可直接喂给后续的 DeepSeek 总结模块。
 
-长音频支持「按静音切分 + 分段转录」：先用 ffmpeg silencedetect 探测静音区间，
-在静音中点设切点把音频切成若干段，逐段转录后追加产出（边转边出，可显示进度、
-分批写盘）。切点都落在无人说话处，故不会把句子拦腰截断，精度不受影响。
+长音频支持「按语音间隙切分 + 分段转录」：先用 Silero VAD（见 kits.vad）探出人声区间、
+反推非语音间隙，在间隙中点设切点把音频切成若干段，逐段转录后追加产出（边转边出，
+可显示进度、分批写盘）。切点都落在无人说话处，故不会把句子拦腰截断，精度不受影响。
+VAD 能区分「人声 vs 音乐/噪音」，鹿乃长时间唱歌 / BGM 时也能找到真正的人声间隙。
 """
 
 from __future__ import annotations
 
-import re
 import subprocess
 import tempfile
 import warnings
@@ -40,7 +40,6 @@ __all__ = [
     "SUPPORTED_MODELS",
     "Transcriber",
     "configure_logging",
-    "detect_silences",
     "plan_segments",
     "probe_duration",
     "select_device",
@@ -162,11 +161,6 @@ def select_device() -> str:
     raise RuntimeError("未检测到可用 GPU：需要 CUDA(Nvidia) 或 MPS(Apple Silicon) 设备！")
 
 
-# silencedetect 输出形如：[silencedetect @ ...] silence_start: 12.34
-_SILENCE_START = re.compile(r"silence_start:\s*([\d.]+)")
-_SILENCE_END = re.compile(r"silence_end:\s*([\d.]+)")
-
-
 def probe_duration(audio_file: str) -> float:
     """用 ffprobe 取音频总时长（秒）。失败抛 RuntimeError。"""
     cmd = [
@@ -182,46 +176,18 @@ def probe_duration(audio_file: str) -> float:
         raise RuntimeError(f"无法解析音频时长: {result.stdout[:100]}") from e
 
 
-def detect_silences(
-    audio_file: str, noise_db: float = -45.0, min_silence: float = 0.5
-) -> list[tuple[float, float]]:
-    """用 ffmpeg silencedetect 探测静音区间，返回 [(start, end), ...]（秒）。
-
-    noise_db: 音量低于该响度视为静音（越负越严格、检出静音越少，越接近 0 越宽松）。
-    min_silence: 最短静音时长，短于此不计入。
-    """
-    cmd = [
-        "ffmpeg", "-i", audio_file,
-        "-af", f"silencedetect=noise={noise_db}dB:d={min_silence}",
-        "-f", "null", "-",
-    ]
-    # silencedetect 把结果打到 stderr
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    log = result.stderr
-
-    silences: list[tuple[float, float]] = []
-    pending_start: float | None = None
-    for line in log.splitlines():
-        if (m := _SILENCE_START.search(line)) is not None:
-            pending_start = float(m.group(1))
-        elif (m := _SILENCE_END.search(line)) is not None and pending_start is not None:
-            silences.append((pending_start, float(m.group(1))))
-            pending_start = None
-    return silences
-
-
-def _longest_silence_midpoint(
-    silences: list[tuple[float, float]], lo: float, hi: float
+def _longest_gap_midpoint(
+    gaps: list[tuple[float, float]], lo: float, hi: float
 ) -> float | None:
-    """在 (lo, hi) 窗口内挑「时长最长」的静音，返回其中点；无则 None。
+    """在 (lo, hi) 窗口内挑「时长最长」的非语音间隙，返回其中点；无则 None。
 
-    选最长静音而非第一个：最长的停顿最可能是真正的语句/段落间隙，切在那里
+    选最长间隙而非第一个：最长的停顿最可能是真正的语句/段落间隙，切在那里
     最不容易把一句话拦腰截断。中点须严格落在 (lo, hi) 内才作数。
     并列时取更靠前者（先到先得，使分段更接近 target_chunk、不无谓拖长）。
     """
     best_mid: float | None = None
     best_len = -1.0
-    for s, e in silences:
+    for s, e in gaps:
         mid = (s + e) / 2
         if not (lo < mid < hi):
             continue
@@ -234,36 +200,33 @@ def _longest_silence_midpoint(
 
 def plan_segments(
     duration: float,
-    silences: list[tuple[float, float]],
+    gaps: list[tuple[float, float]],
     target_chunk: float = 300.0,
     max_chunk: float = 600.0,
-    fallback_silences: list[tuple[float, float]] | None = None,
 ) -> list[tuple[float, float]]:
-    """根据静音区间规划分段切点，返回 [(start, end), ...] 覆盖 [0, duration]。
+    """根据非语音间隙规划分段切点，返回 [(start, end), ...] 覆盖 [0, duration]。
+
+    gaps 为 VAD 探出人声区间后反推的「非语音间隙」（见 kits.vad.speech_to_gaps），
+    与旧版 silencedetect 的静音区间同构。
 
     策略：从当前段起点出发，在窗口 (起点+target_chunk, 起点+max_chunk) 内选「时长最长」
-    的静音中点处切（最长停顿最可能是真正语句间隙，切在那里最不易截断语句）；
-    若严格阈值在该窗口内无静音（如长时间唱歌），改用 fallback_silences（更宽松阈值探到的
-    静音）里的最长静音退而求其次；仍无才在 max_chunk 处强切兜底。
+    的间隙中点处切（最长停顿最可能是真正语句间隙，切在那里最不易截断语句）；
+    该窗口内无间隙可切时（极端情况，如整段连续人声），在 max_chunk 处强切兜底。
 
-    fallback_silences 为 None 时只是不启用二次探测，主切点仍走「窗口内最长静音」。
+    VAD 能区分人声与音乐/噪音，唱歌 / BGM 段也能找到真正的人声间隙，故不再需要旧版
+    那套「宽松阈值二次探测」的退路——硬切只在窗口内确实无任何人声间隙时才发生。
     """
     if duration <= max_chunk:
         return [(0.0, duration)]
 
-    fb = fallback_silences or []
     segments: list[tuple[float, float]] = []
     start = 0.0
     while start < duration:
         soft_limit = start + target_chunk
         hard_limit = start + max_chunk
-        # 优先：严格阈值静音里窗口内最长的
-        cut = _longest_silence_midpoint(silences, soft_limit, hard_limit)
+        # 窗口内最长的非语音间隙中点；无则在硬上限强切兜底
+        cut = _longest_gap_midpoint(gaps, soft_limit, hard_limit)
         if cut is None:
-            # 退而求其次：宽松阈值静音里窗口内最长的
-            cut = _longest_silence_midpoint(fb, soft_limit, hard_limit)
-        if cut is None:
-            # 都没有：强切在硬上限兜底
             cut = hard_limit
         end = min(cut, duration)
         segments.append((start, end))
@@ -451,24 +414,28 @@ class Transcriber:
         beams: int = 3,
         target_chunk: float = 300.0,
         max_chunk: float = 600.0,
-        noise_db: float = -45.0,
+        vad_threshold: float = 0.5,
         min_silence: float = 0.5,
         overlap: float = 2.0,
-        fallback_db: float = -35.0,
         bar: object | None = None,
     ) -> Iterator[list[Word]]:
-        """按静音切分长音频，逐段转录并产出（已对齐全局时间轴的）词列表。
+        """按语音间隙切分长音频，逐段转录并产出（已对齐全局时间轴的）词列表。
 
-        每段转完即 yield，调用方可据此显示进度、分批写盘。切点落在静音中点，
-        不打断语句，故精度与整段转录一致。短音频（<= max_chunk）退化为一次整段转录。
+        每段转完即 yield，调用方可据此显示进度、分批写盘。切点落在 VAD 探出的非语音
+        间隙中点，不打断语句，故精度与整段转录一致。短音频（<= max_chunk）退化为一次
+        整段转录。
+
+        切点来源：用 Silero VAD（见 kits.vad）探出人声区间、反推非语音间隙，交给
+        plan_segments 在 (target_chunk, max_chunk) 窗口内挑最长间隙中点切。VAD 能区分
+        「人声 vs 音乐/噪音」，鹿乃长时间唱歌 / BGM 时也能找到真正的人声间隙，切点质量
+        优于旧版纯音量阈值（silencedetect）。
+
+        vad_threshold: VAD 语音概率阈值（0~1），高于此算人声；越大越严格。
+        min_silence: 短于此（秒）的停顿并入人声、不算间隙；越大间隙越少、段越接近整段。
 
         overlap: 取数窗口在每段逻辑区间两侧各外扩的秒数（垫料），给模型在接缝处留
         上下文、避免把词/乐句切碎（鹿乃长时间唱歌时硬切尤甚）。转录后按「词中心落在
         本段逻辑区间」过滤，垫料区的词归相邻段，接缝无缝去重。逻辑区间本身仍无缝相接。
-
-        fallback_db: 二次「宽松」静音阈值（应 > noise_db，越接近 0 越宽松）。当严格阈值
-        noise_db 在某段 [target,max] 区间探不到静音、本会在 max_chunk 处硬切时，改用这批
-        宽松候选找次优切点，把硬切降为真正的最后兜底。设为 <= noise_db 则关闭二次探测。
 
         bar: 可选 tqdm 进度条实例。传入则日志走 tqdm.write()（自动让进度条钉在底部、
         日志逐行上滚不冲突）、进度按已转录秒数推进（bar.total 设为音频总时长、每段
@@ -502,19 +469,18 @@ class Transcriber:
                 bar.update(duration - bar.n)  # 推到满
             return
 
-        _emit(f"🔍 探测静音区间（noise={noise_db}dB, d={min_silence}s）...")
-        silences = detect_silences(audio_file, noise_db, min_silence)
-        _emit(f"  找到 {len(silences)} 段静音")
-        # 宽松阈值二次探测（仅当 fallback_db 比严格阈值更宽松时才跑），给硬切段兜次优切点
-        fallback_silences: list[tuple[float, float]] | None = None
-        if fallback_db > noise_db:
-            _emit(f"🔍 二次宽松探测（noise={fallback_db}dB, d={min_silence}s）...")
-            fallback_silences = detect_silences(audio_file, fallback_db, min_silence)
-            # noinspection PyTypeChecker
-            _emit(f"  找到 {len(fallback_silences)} 段（宽松）\n")
-        segments = plan_segments(
-            duration, silences, target_chunk, max_chunk, fallback_silences
+        # 用 VAD 探出人声间隙作为切点来源。VAD 跟随转录设备：CUDA 复用以提速，
+        # 其余（CPU/MPS）走 CPU——MPS 上 silero jit 兼容性不稳，且 VAD 本身极轻量。
+        from kits.vad import VADetector
+
+        vad_device = "cuda" if self.device == "cuda" else "cpu"
+        _emit(f"🔍 VAD 探测人声间隙（threshold={vad_threshold}, min_silence={min_silence}s）...")
+        detector = VADetector(
+            threshold=vad_threshold, min_silence=min_silence, device=vad_device
         )
+        gaps = detector.detect_gaps(audio_file, duration)
+        _emit(f"  找到 {len(gaps)} 段非语音间隙")
+        segments = plan_segments(duration, gaps, target_chunk, max_chunk)
         _emit(f"✂️  规划为 {len(segments)} 段，开始分段转录（重叠区域 {overlap:.1f}s）")
 
         total = len(segments)
