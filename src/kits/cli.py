@@ -148,13 +148,15 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="标点恢复模型(默认 xlm-roberta 日语句读模型)",
     )
-    # 实验性：逐 VAD 人声窗口转录（替代「切含静音大段」）。锚定真实人声边界、根治 kotoba
-    # 前导静音漂移；只转人声窗口、丢弃窗口间静音。与旧路径并存对比，默认走旧路径。
+    # 转录分段策略。默认走逐 VAD 人声窗口（锚定真实人声边界、根治前导静音漂移，对纯说话
+    # 场次对齐最佳）。但 silero VAD 对唱歌延音系统性漏判（持续长元音不被判为语音），那段
+    # 字幕会整段丢失——故歌枠等含大量唱歌的内容应改用 --full-transcribe（整段连续转、不丢
+    # 唱歌，代价是前导静音可能让首句时间戳偏早）。
     parser.add_argument(
-        "--vad-window",
+        "--full-transcribe",
         action="store_true",
-        help="[实验]逐 VAD 人声窗口转录，锚定真实人声边界、根治前导静音漂移"
-        "（只转人声窗口、丢弃窗口间静音；默认走旧的按间隙切大段）",
+        help="整段连续转录（不丢唱歌延音；唱歌/歌枠用此模式）。"
+        "默认走逐 VAD 人声窗口（对齐更准但会丢唱歌延音字幕）",
     )
 
 
@@ -373,8 +375,9 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
     # 规划阶段：在转录进度条创建之前完成（VAD 模型加载与全程扫描耗时可观，放进度条之前
     # 跑完、日志才不冲乱进度条）。传 _make_bar 让 VAD 扫描自带 0~100% 进度条。
     # speech 透传给 segment_sentences，把 kotoba 虚高 end 夹回真实人声边界（clamp 自我保护）。
-    if getattr(args, "vad_window", False):
-        # 新路径：逐 VAD 人声窗口转录（锚定真实人声边界、根治前导静音漂移）
+    if not getattr(args, "full_transcribe", False):
+        # 默认：逐 VAD 人声窗口转录（锚定真实人声边界、根治前导静音漂移，纯说话场次对齐最佳）。
+        # 注意：silero 对唱歌延音漏判 → 那段字幕丢失，歌枠应改用 --full-transcribe。
         duration, windows = transcriber.plan_windows(audio_file, make_bar=_make_bar)
         speech = windows  # 窗口即人声区间，复用作 clamp 的真实边界
         bar = _make_bar(total=len(windows), desc="🎬 转录进度", unit="窗")
@@ -383,7 +386,8 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
             language=args.language, beams=args.beams, bar=bar,
         )
     else:
-        # 旧路径：按非语音间隙切含静音的连续大段
+        # --full-transcribe：按非语音间隙切含静音的连续大段、整段连续转。不靠 VAD 决定转不转，
+        # 故不丢唱歌延音（kotoba 整段连续转能识别歌词）；代价是前导静音可能让首句时间戳偏早。
         duration, segments, speech = transcriber.plan_audio(
             audio_file,
             target_chunk=args.target_chunk,
