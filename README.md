@@ -10,7 +10,7 @@ _鹿乃 Twitch 直播智能总结_
 [![CUDA](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
 [![PyTorch](https://img.shields.io/badge/PyTorch-cu128-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 
-一站式处理鹿乃 Twitch 直播：**下载直播 → 分离人声 → 转写 SRT 日语字幕文件 → 可选转写 SRT 中文字幕文件 → AI 总结**。
+一站式处理鹿乃直播/视频：**下载音视频 → 分离人声 → 转写 SRT 日语字幕文件 → 可选转写 SRT 中文字幕文件 → AI 总结**。
 
 </div>
 
@@ -23,7 +23,7 @@ _鹿乃 Twitch 直播智能总结_
 - [安装与部署](#安装与部署)
   - [环境要求一览](#环境要求一览)
 - [使用方法](#使用方法)
-  - [download：下载 Twitch 直播](#download下载-twitch-直播)
+  - [download：下载直播/视频](#download下载直播视频)
   - [subtitle：音频转字幕](#subtitle音频转字幕)
     - [标点恢复（默认开启）](#标点恢复默认开启)
     - [长音频分段转录](#长音频分段转录)
@@ -50,6 +50,7 @@ _鹿乃 Twitch 直播智能总结_
 ## 功能特性
 
 - 🐙 异步并发下载 Twitch 直播 TS 分片，自动探测视频长度，合并为 MP4
+- 📥 可选接入 yt-dlp，下载 YouTube 等更多平台的视频/直播回放，复用同一套字幕与总结流水线
 - 🎵 可选提取 MP3 音频，可选保留 / 清理临时 TS 文件
 - 🎤 使用 Whisper 进行语音识别，默认 `kotoba-whisper-v2.2`（日语识别更准的蒸馏模型）
 - ✂️ 句子级断句，按句末标点 / 停顿 / 长度上限智能切分，保证句子完整不被拦腰截断
@@ -79,6 +80,8 @@ _鹿乃 Twitch 直播智能总结_
 git clone https://github.com/kanbereina/KITS.git
 cd KITS
 uv sync              # 创建虚拟环境并装齐所有依赖（含 dev 组）
+# 如需下载 YouTube 等非 Twitch TS URL，额外安装 yt-dlp 后端
+uv sync --extra ytdlp
 ```
 
 `uv sync` 会按平台自动选对依赖：
@@ -122,7 +125,7 @@ export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY
 
 | 命令 | 别名 | 用途 | 最简示例 | 需 GPU | 需 API Key |
 | --- | --- | --- | --- | :---: | :---: |
-| [`download`](#download下载-twitch-直播) | `dl` | 下载 Twitch 直播，合并 MP4 / 提取 MP3 | `uv run kits dl "<ts_url>" -o name` | 否¹ | 否 |
+| [`download`](#download下载直播视频) | `dl` | 下载 Twitch TS 或 yt-dlp 支持的视频，导出 MP4 / MP3 | `uv run kits dl "<url>" -o name` | 否¹ | 否 |
 | [`subtitle`](#subtitle音频转字幕) | `srt` | 音频转带时间戳的 SRT 字幕 | `uv run kits srt -i audio.mp3` | 是 | 否 |
 | [`translate`](#translate日语字幕译中文) | `tr` | 日语 SRT 翻译成中文 SRT | `uv run kits tr -i live.srt` | 否 | 是 |
 | [`separate`](#separate分离人声) | `sep` | 从音频分离出人声，去 BGM / 伴奏 | `uv run kits sep -i audio.mp3` | 是 | 否 |
@@ -130,16 +133,22 @@ export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY
 
 > ¹ `download` 本身不需要 GPU；但加 `--srt`（下载后自动转字幕）会调用 Whisper，需要 GPU。
 
-### download：下载 Twitch 直播
+### download：下载直播/视频
 
-传入任意一个 TS 分片的 URL（形如 `https://.../chunked/1710.ts`），自动探测整场直播范围并下载合并:
+`download` 默认使用 `--backend auto`：传入数字 `.ts` 分片 URL（形如 `https://.../chunked/1710.ts`）时走原有 Twitch 直连路径；传入其他视频页面 URL 时走 yt-dlp 后端（需 `uv sync --extra ytdlp`）。
 
 ```bash
-# 下载并合并为 MP4
+# Twitch TS：下载并合并为 MP4
 uv run kits download "https://.../chunked/1710.ts" -o my_stream
 
-# 下载 + 提取 MP3
+# Twitch TS：下载 + 提取 MP3
 uv run kits download "https://.../chunked/1710.ts" -o my_stream --mp3
+
+# yt-dlp：下载 YouTube 等平台视频 + 提取 MP3
+uv run --extra ytdlp kits download "https://www.youtube.com/watch?v=..." -o my_video --mp3
+
+# yt-dlp：仅保留 MP3，适合直接转字幕/总结
+uv run --extra ytdlp kits download "https://www.youtube.com/watch?v=..." -o my_video --audio-only
 
 # 一条龙：下载 -> 提取音频 -> 生成 SRT 字幕
 uv run kits download "https://.../chunked/1710.ts" -o my_stream --srt
@@ -149,17 +158,20 @@ uv run kits download "https://.../chunked/1710.ts" -o my_stream --srt
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `url` | （必填） | TS 分片示例 URL（仅用于定位地址，编号被忽略） |
+| `url` | （必填） | Twitch TS 分片 URL，或 yt-dlp 支持的视频/直播回放 URL |
 | `-o, --output` | `output` | 输出文件名（不含扩展名） |
 | `--dir` | `downloads` | 下载 / 输出目录 |
-| `--start` | `0` | 起始分片编号，默认从 0 下载整场直播 |
-| `--end` | 二分探测 | 结束分片编号，默认指数探测 + 二分自动定位结尾 |
-| `--concurrent` | `5` | 最大并发下载数 |
-| `--keep-ts` | 关闭 | 保留临时 TS 文件 |
+| `--backend` | `auto` | 下载后端：`auto` / `twitch` / `yt-dlp` |
+| `--audio-only` | 关闭 | yt-dlp 后端仅下载/保留 MP3 音频 |
+| `--yt-format` | 自动 | 传给 yt-dlp 的 format 选择器 |
+| `--start` | `0` | Twitch 直连专用：起始分片编号，默认从 0 下载整场直播 |
+| `--end` | 二分探测 | Twitch 直连专用：结束分片编号，默认指数探测 + 二分自动定位结尾 |
+| `--concurrent` | `5` | 最大并发下载数；Twitch 直连为 TS 分片并发，yt-dlp 为 HLS/DASH 分片并发 |
+| `--keep-ts` | 关闭 | Twitch 直连专用：保留临时 TS 文件 |
 | `--mp3` | 关闭 | 额外导出 MP3 |
 | `--srt` | 关闭 | 额外生成 SRT 字幕（自动转录，隐含导出 MP3） |
 
-> `--srt` 会调用 Whisper 转录，需要 GPU。还支持下方 `subtitle` 的全部断句参数（`--max-gap` 等）。
+> `--srt` 会调用 Whisper 转录，需要 GPU。yt-dlp 对正在直播中的流支持取决于站点与 yt-dlp 本身；KITS 侧主要复用已下载音频做转录、翻译与总结。还支持下方 `subtitle` 的全部断句参数（`--max-gap` 等）。
 
 ### subtitle：音频转字幕
 
@@ -420,7 +432,7 @@ src/kits/
   transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按 VAD 人声间隙切分、分段流式产出 chunk 级时间戳
   vad.py           # 语音活动检测：Silero VAD 探人声区间、反推非语音间隙作切点（延迟导入 torch/silero-vad）
   punctuator.py    # 标点恢复：给无标点的转录 chunk 补日语句读（延迟导入 punctuators），时间戳不变
-  downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
+  downloader.py    # 下载后端：Twitch TS 直连 + yt-dlp 通用下载，产出 MP4 / MP3
   translator.py    # 把日语 SRT 翻译成中文 SRT（经 llm 客户端，默认 DeepSeek）
   separator.py     # 人声分离：封装 audio-separator（延迟导入，默认只出 Vocals 轨）
   summarizer.py    # 总结 SRT，提示词走 JSON 预设、长字幕 map-reduce 分块（经 llm 客户端，默认 DeepSeek）
@@ -432,7 +444,8 @@ main.py            # 薄入口，委托给 kits.cli
 
 各模块职责清晰、相互解耦:
 
-- `downloader.TwitchDownloader` 下载并合并直播，产出 MP4 / MP3，不依赖 torch
+- `downloader.TwitchDownloader` 下载并合并 Twitch TS 分片，产出 MP4 / MP3，不依赖 torch
+- `downloader.YtDlpDownloader` 通过可选 yt-dlp 后端下载更多平台的视频/直播回放，产出 MP4 / MP3，不依赖 torch
 - `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；长音频走 `plan_audio()`（VAD 探人声间隙、规划分段）+ `transcribe_segments()`（逐段流式产出）
 - `vad.VADetector.detect_gaps()` 用 Silero VAD 探人声区间、反推非语音间隙喂给分段规划（延迟导入重依赖）
 - `punctuator.Punctuator.restore()` 给无标点的 chunk 补日语句读，时间戳不变（延迟导入重依赖）

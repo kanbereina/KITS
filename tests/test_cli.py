@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kits.cli import _make_bar
+from kits.cli import _make_bar, build_parser
 
 
 class TestMakeBar:
@@ -46,3 +46,30 @@ class TestMakeBar:
             assert "转录进度" in bar.desc
         finally:
             bar.close()
+
+
+class TestDownloadParser:
+    def test_download_backend_defaults_to_auto(self):
+        args = build_parser().parse_args(["download", "https://example.com/chunked/0.ts"])
+
+        assert args.backend == "auto"
+        assert args.audio_only is False
+        assert args.yt_format is None
+        assert args.concurrent == 5
+
+    def test_download_accepts_ytdlp_options(self):
+        args = build_parser().parse_args(
+            [
+                "download",
+                "https://www.youtube.com/watch?v=abc",
+                "--backend",
+                "yt-dlp",
+                "--audio-only",
+                "--yt-format",
+                "bestaudio/best",
+            ]
+        )
+
+        assert args.backend == "yt-dlp"
+        assert args.audio_only is True
+        assert args.yt_format == "bestaudio/best"

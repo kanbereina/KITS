@@ -16,7 +16,7 @@
 
 """命令行入口：子命令 download / subtitle / translate / separate / summarize（各带简写别名）。
 
-download:  下载 Twitch 直播 -> 合并 MP4 -> 可选 MP3 / SRT
+download:  下载 Twitch TS 或 yt-dlp 支持的视频 -> 可选 MP3 / SRT
 subtitle:  已有音频 -> SRT 字幕（可选 --separate 先分离人声）
 translate: 日语 SRT -> 中文 SRT（AI 翻译）
 separate:  从音频分离出人声（audio-separator）
@@ -170,14 +170,30 @@ def build_parser() -> argparse.ArgumentParser:
     # --- download 子命令 ---
     dl = sub.add_parser(
         "download", aliases=["dl"], parents=[verbose_parent],
-        help="下载 Twitch 直播并合并为 MP4",
+        help="下载 Twitch TS 或 yt-dlp 支持的视频/直播回放",
     )
-    dl.add_argument("url", help="TS 文件示例 URL，形如 https://.../chunked/1710.ts")
+    dl.add_argument("url", help="Twitch TS 分片 URL，或 yt-dlp 支持的视频/直播回放 URL")
     dl.add_argument("-o", "--output", default="output", help="输出文件名(不含扩展名)")
     dl.add_argument("--dir", default="downloads", help="下载目录")
+    dl.add_argument(
+        "--backend",
+        choices=("auto", "twitch", "yt-dlp"),
+        default="auto",
+        help="下载后端：auto 对数字 .ts 分片走 Twitch 直连，其余走 yt-dlp",
+    )
+    dl.add_argument(
+        "--audio-only",
+        action="store_true",
+        help="仅下载/保留 MP3 音频（yt-dlp 后端生效）",
+    )
+    dl.add_argument(
+        "--yt-format",
+        default=None,
+        help="传给 yt-dlp 的 format 选择器（yt-dlp 后端生效）",
+    )
     dl.add_argument("--start", type=int, default=None, help="起始编号(默认 0，下载整场)")
     dl.add_argument("--end", type=int, default=None, help="结束编号(默认二分探测)")
-    dl.add_argument("--concurrent", type=int, default=5, help="最大并发下载数")
+    dl.add_argument("--concurrent", type=int, default=5, help="最大并发下载数（yt-dlp 为分片并发数）")
     dl.add_argument("--keep-ts", action="store_true", help="保留临时 TS 文件")
     dl.add_argument("--mp3", action="store_true", help="额外导出 MP3 音频")
     dl.add_argument("--srt", action="store_true", help="额外生成 SRT 字幕(自动转录音频)")
@@ -427,25 +443,42 @@ def _print_preview(sentences: list[Sentence], output_srt: str) -> None:
 
 
 def _run_download(args: argparse.Namespace) -> None:
-    from kits.downloader import TwitchDownloader
+    from kits.downloader import TwitchDownloader, YtDlpDownloader, select_download_backend
 
     print("=" * 60)
-    print("🐙 Twitch 直播下载")
+    print("🐙 下载")
     print("=" * 60)
 
-    downloader = TwitchDownloader(download_dir=args.dir, max_concurrent=args.concurrent)
     # 生成 SRT 必然需要音频，故强制提取 MP3
     need_mp3 = args.mp3 or args.srt
-    outputs = asyncio.run(
-        downloader.download_from_url(
+    backend = select_download_backend(args.url, args.backend)
+    if backend == "twitch":
+        if args.audio_only:
+            raise ValueError("--audio-only 仅支持 yt-dlp 后端；Twitch 直连请使用 --mp3")
+        if args.yt_format:
+            raise ValueError("--yt-format 仅支持 yt-dlp 后端")
+        downloader = TwitchDownloader(download_dir=args.dir, max_concurrent=args.concurrent)
+        outputs = asyncio.run(
+            downloader.download_from_url(
+                args.url,
+                output_name=args.output,
+                start_num=args.start,
+                end_num=args.end,
+                keep_ts=args.keep_ts,
+                extract_audio=need_mp3,
+            )
+        )
+    else:
+        if args.start is not None or args.end is not None or args.keep_ts:
+            raise ValueError("--start/--end/--keep-ts 仅支持 Twitch TS 直连后端")
+        downloader = YtDlpDownloader(download_dir=args.dir, max_concurrent=args.concurrent)
+        outputs = downloader.download_from_url(
             args.url,
             output_name=args.output,
-            start_num=args.start,
-            end_num=args.end,
-            keep_ts=args.keep_ts,
             extract_audio=need_mp3,
+            audio_only=args.audio_only,
+            format_selector=args.yt_format,
         )
-    )
 
     if args.srt:
         mp3_path = outputs["mp3"]

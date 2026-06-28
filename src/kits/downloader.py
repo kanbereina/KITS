@@ -14,10 +14,11 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""Twitch 直播下载：异步下载 TS 分片 -> 合并 MP4 -> 可选提取 MP3。
+"""下载后端：Twitch TS 直连与 yt-dlp 通用下载。
 
 不依赖 torch / transformers。产出的 MP3 可交给 kits.transcriber 转字幕。
-合并与音频提取依赖系统已安装的 ffmpeg。
+Twitch 直连路径负责 TS 分片 -> 合并 MP4 -> 可选提取 MP3；yt-dlp 路径负责
+YouTube 等通用站点下载。合并、转码与音频提取依赖系统已安装的 ffmpeg。
 """
 
 from __future__ import annotations
@@ -26,11 +27,20 @@ import asyncio
 import re
 import shutil
 import subprocess
+import time
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 import httpx
 
-__all__ = ["TwitchDownloader", "parse_url_pattern"]
+__all__ = [
+    "TwitchDownloader",
+    "YtDlpDownloader",
+    "is_twitch_ts_url",
+    "parse_url_pattern",
+    "select_download_backend",
+]
 
 # 从形如 https://.../chunked/1710.ts 或 https://.../160p30/3.ts 的 URL 中
 # 拆出 (基础URL, 编号, 扩展名)。分片目录名随画质而变（chunked / 160p30 / 720p60 等），
@@ -52,6 +62,27 @@ def parse_url_pattern(url: str) -> tuple[str, int, str]:
     if not match:
         raise ValueError(f"无法解析 URL 格式: {url}")
     return match.group(1), int(match.group(2)), match.group(3)
+
+
+def is_twitch_ts_url(url: str) -> bool:
+    """判断 URL 是否符合旧 Twitch TS 分片直连格式。"""
+    try:
+        parse_url_pattern(url)
+    except ValueError:
+        return False
+    return True
+
+
+def select_download_backend(url: str, backend: str = "auto") -> str:
+    """按用户参数和 URL 形态选择下载后端。
+
+    auto：数字 .ts 分片沿用 Twitch 直连，其余 URL 交给 yt-dlp。
+    """
+    if backend not in {"auto", "twitch", "yt-dlp"}:
+        raise ValueError(f"未知下载后端: {backend}")
+    if backend != "auto":
+        return backend
+    return "twitch" if is_twitch_ts_url(url) else "yt-dlp"
 
 
 def _check_ffmpeg() -> bool:
@@ -272,4 +303,149 @@ class TwitchDownloader:
 
         print("\n" + "=" * 60)
         print("🎉 下载处理完成！")
+        return outputs
+
+
+class YtDlpDownloader:
+    """yt-dlp 通用下载器。
+
+    yt-dlp 是可选依赖，只有实际走该后端时才导入。默认下载并尽量合并为 MP4；
+    需要转字幕时可同时提取 MP3，或用 audio_only 只保留音频。
+    """
+
+    _VIDEO_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
+
+    def __init__(self, download_dir: str = "downloads", max_concurrent: int = 5):
+        self.download_dir = Path(download_dir)
+        self.max_concurrent = max_concurrent
+        self.download_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _import_ytdlp() -> Any:
+        try:
+            import yt_dlp
+        except ModuleNotFoundError as e:
+            raise RuntimeError(
+                "未安装 yt-dlp，无法下载非 Twitch TS URL。请运行：uv sync --extra ytdlp"
+            ) from e
+        return yt_dlp
+
+    def _build_options(
+        self,
+        output_name: str,
+        *,
+        extract_audio: bool,
+        keep_video: bool,
+        format_selector: str | None = None,
+    ) -> dict[str, Any]:
+        """构造 yt-dlp Python API 参数。独立出来便于单测。"""
+        output_template = str(self.download_dir / f"{output_name}.%(ext)s")
+        if format_selector:
+            selected_format = format_selector
+        elif keep_video:
+            selected_format = "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/best[ext=mp4]/best"
+        else:
+            selected_format = "bestaudio/best"
+
+        options: dict[str, Any] = {
+            "format": selected_format,
+            "outtmpl": output_template,
+            "concurrent_fragment_downloads": self.max_concurrent,
+            "noplaylist": True,
+            "quiet": False,
+            "no_warnings": False,
+        }
+        if keep_video:
+            options["merge_output_format"] = "mp4"
+        if extract_audio:
+            options["keepvideo"] = keep_video
+            options["postprocessors"] = [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }
+            ]
+        return options
+
+    def _find_output(
+        self,
+        output_name: str,
+        suffixes: Iterable[str],
+        *,
+        newer_than: float | None = None,
+    ) -> Path | None:
+        """按输出 stem 找 yt-dlp 产物，避开 .part / .temp 等临时文件。"""
+        suffix_set = {suffix.lower() for suffix in suffixes}
+        candidates = [
+            path
+            for path in self.download_dir.glob(f"{output_name}.*")
+            if path.is_file()
+            and path.suffix.lower() in suffix_set
+            and (newer_than is None or path.stat().st_mtime >= newer_than)
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+
+    def _require_output(
+        self,
+        output_name: str,
+        suffixes: Iterable[str],
+        label: str,
+        *,
+        newer_than: float | None = None,
+    ) -> Path:
+        path = self._find_output(output_name, suffixes, newer_than=newer_than)
+        if path is None:
+            suffix_text = ", ".join(sorted(suffixes))
+            raise RuntimeError(f"yt-dlp 已结束，但未找到 {label} 产物（期望扩展名: {suffix_text}）")
+        return path
+
+    def download_from_url(
+        self,
+        url: str,
+        output_name: str = "output",
+        *,
+        extract_audio: bool = False,
+        audio_only: bool = False,
+        format_selector: str | None = None,
+    ) -> dict[str, Path]:
+        """用 yt-dlp 下载 URL，返回产物路径字典。
+
+        keys: keep_video 为真时含 "mp4"；extract_audio/audio_only 为真时含 "mp3"。
+        """
+        if audio_only:
+            extract_audio = True
+        keep_video = not audio_only
+
+        print(f"\n🎬 yt-dlp 开始处理: {url}")
+        print("=" * 60)
+
+        yt_dlp = self._import_ytdlp()
+        options = self._build_options(
+            output_name,
+            extract_audio=extract_audio,
+            keep_video=keep_video,
+            format_selector=format_selector,
+        )
+        started_at = time.time()
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=True)
+        if info is None:
+            raise RuntimeError("yt-dlp 未返回下载信息")
+
+        outputs: dict[str, Path] = {}
+        if keep_video:
+            outputs["mp4"] = self._require_output(
+                output_name,
+                self._VIDEO_SUFFIXES,
+                "视频",
+                newer_than=started_at,
+            )
+        if extract_audio:
+            outputs["mp3"] = self._require_output(output_name, {".mp3"}, "MP3", newer_than=started_at)
+
+        print("\n" + "=" * 60)
+        print("🎉 yt-dlp 下载处理完成！")
         return outputs
