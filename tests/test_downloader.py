@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 
 import pytest
 
-from kits.downloader import DEFAULT_CONCURRENT_FRAGMENTS, YtDlpDownloader
+from kits.downloader import DEFAULT_CONCURRENT_FRAGMENTS, DEFAULT_YTDLP_COMMAND, YtDlpDownloader
 
 
 class TestYtDlpDownloader:
@@ -16,7 +15,7 @@ class TestYtDlpDownloader:
 
         command = downloader._build_command("https://example.com/watch?v=1", "live")
 
-        assert command[:3] == [sys.executable, "-m", "yt_dlp"]
+        assert command[0] == DEFAULT_YTDLP_COMMAND
         assert command[-1] == "https://example.com/watch?v=1"
         assert command[command.index("--paths") + 1] == str(tmp_path)
         assert command[command.index("--output") + 1] == "live.%(ext)s"
@@ -39,6 +38,13 @@ class TestYtDlpDownloader:
     def test_rejects_invalid_concurrency(self, tmp_path):
         with pytest.raises(ValueError):
             YtDlpDownloader(download_dir=str(tmp_path), concurrent_fragments=0)
+
+    def test_build_command_accepts_custom_ytdlp_command(self, tmp_path):
+        downloader = YtDlpDownloader(download_dir=str(tmp_path), ytdlp_command="custom-ytdlp")
+
+        command = downloader._build_command("https://example.com/watch?v=1", "live")
+
+        assert command[0] == "custom-ytdlp"
 
     def test_resolve_audio_path_prefers_printed_file(self, tmp_path):
         audio = tmp_path / "printed.mp3"
@@ -80,4 +86,14 @@ class TestYtDlpDownloader:
         downloader = YtDlpDownloader(download_dir=str(tmp_path))
 
         with pytest.raises(RuntimeError, match="yt-dlp 下载失败"):
+            downloader.download_from_url("https://example.com/watch?v=1")
+
+    def test_download_from_url_reports_missing_ytdlp(self, tmp_path, monkeypatch):
+        def fake_run(command, capture_output, text, encoding, errors, check):
+            raise FileNotFoundError
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        downloader = YtDlpDownloader(download_dir=str(tmp_path))
+
+        with pytest.raises(RuntimeError, match="pip install -U yt-dlp"):
             downloader.download_from_url("https://example.com/watch?v=1")

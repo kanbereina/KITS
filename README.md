@@ -72,6 +72,7 @@ _鹿乃 Twitch 直播智能总结_
 
 - [uv](https://docs.astral.sh/uv/)（包管理 + 运行器）— 装好后 `uv --version` 应有输出
 - [ffmpeg](https://ffmpeg.org/download.html) — 须在 PATH 中，`ffmpeg -version` 应有输出（yt-dlp 音频提取/转码、音频切分都依赖它）
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — 须在 PATH 中，`yt-dlp --version` 应有输出；建议自行保持最新版：`pip install -U yt-dlp`
 - GPU — 转字幕、分离人声需要。Nvidia 显卡（`nvidia-smi` 应能看到显卡）或 Apple Silicon（M 系列芯片，走 MPS 加速）二选一
 
 **2. 克隆并同步依赖**
@@ -80,6 +81,7 @@ _鹿乃 Twitch 直播智能总结_
 git clone https://github.com/kanbereina/KITS.git
 cd KITS
 uv sync              # 创建虚拟环境并装齐所有依赖（含 dev 组）
+pip install -U yt-dlp # 安装/更新 yt-dlp；它更新频繁，不随 uv lock 固定版本
 ```
 
 `uv sync` 会按平台自动选对依赖：
@@ -93,6 +95,7 @@ uv sync              # 创建虚拟环境并装齐所有依赖（含 dev 组）
 uv run kits --help          # 看到子命令说明即安装成功
 # Nvidia 应输出 CUDA: True；Apple Silicon 应输出 MPS: True
 uv run python -c "import torch; print('CUDA:', torch.cuda.is_available(), '| MPS:', torch.backends.mps.is_available())"
+yt-dlp --version            # 应输出版本号；下载站点适配异常时先 pip install -U yt-dlp
 ```
 
 **4.（可选）配置大模型 API Key**
@@ -115,6 +118,7 @@ export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY
 | GPU | 支持 CUDA 的 Nvidia 显卡，或 Apple Silicon（M 系列） | 转字幕 / 分离人声强制要求；仅下载不需要 |
 | CUDA | 12.8（仅 Nvidia） | Linux/Win 的 PyTorch 从 `pytorch-cu128` 源安装，勿换 PyPI 默认源；macOS 不需要 |
 | ffmpeg | 在 PATH 中 | yt-dlp 音频提取/转码、音频切分 |
+| yt-dlp | 在 PATH 中，建议最新版 | 下载 Twitch / YouTube 等视频或直播回放；自行 `pip install -U yt-dlp` 更新 |
 | API Key | 大模型（可选） | 仅 `translate` / `summarize` 需要，默认 DeepSeek |
 
 ## 使用方法
@@ -133,7 +137,7 @@ export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY
 
 ### download：下载直播/视频
 
-`download` 统一使用 yt-dlp。默认选择最佳音频并提取为 MP3，产物可直接交给 `subtitle` / `translate` / `summarize` 流水线；Twitch VOD、YouTube 和其他 yt-dlp 支持的网站都走同一条路径。
+`download` 统一调用 PATH 中的 `yt-dlp` 命令。默认选择最佳音频并提取为 MP3，产物可直接交给 `subtitle` / `translate` / `summarize` 流水线；Twitch VOD、YouTube 和其他 yt-dlp 支持的网站都走同一条路径。
 
 ```bash
 # 下载视频/直播回放音频，默认输出 downloads/live.mp3
@@ -160,7 +164,7 @@ uv run kits download --yt-dlp-args="-f bestaudio --extract-audio" "https://youtu
 | `--srt` | 关闭 | 额外生成 SRT 字幕（自动转录下载后的音频） |
 | `-- ...` | 无 | `--` 后的参数原样透传给 yt-dlp |
 
-> `--srt` 会调用 Whisper 转录，需要 GPU。yt-dlp 对正在直播中的流支持取决于站点与 yt-dlp 本身；KITS 侧主要复用已下载音频做转录、翻译与总结。还支持下方 `subtitle` 的全部断句参数（`--max-gap` 等）。
+> `--srt` 会调用 Whisper 转录，需要 GPU。yt-dlp 对正在直播中的流支持取决于站点与 yt-dlp 本身；下载站点适配异常时先运行 `pip install -U yt-dlp` 更新。KITS 侧主要复用已下载音频做转录、翻译与总结。还支持下方 `subtitle` 的全部断句参数（`--max-gap` 等）。
 
 ### subtitle：音频转字幕
 
