@@ -7,6 +7,7 @@ from kits.subtitle import (
     Word,
     _clamp_overlaps,
     _split_internal_punctuation,
+    _vad_voice_end,
     clean_text,
     parse_srt,
     seconds_to_srt_time,
@@ -263,6 +264,75 @@ class TestSegmentSentences:
         words = [_word("これはふつうのはやさです。", 0.0, 5.0)]  # 13 字 / 5s，约 0.38s/字
         result = segment_sentences(words, max_seconds_per_char=0.5)
         assert abs(result[0]["end"] - result[0]["start"] - 5.0) < 1e-6
+
+    def test_vad_clamps_inflated_end_to_voice_boundary(self):
+        # 虚高句（8 字标成 36s）：VAD 人声在 12s 结束 → end 应被夹到 12s（VAD 优先）
+        text = "ごめん記者よいしょ"  # 9 字
+        words = [_word(text, 10.0, 46.0)]  # ratio=4s/字，明显虚高
+        speech = [(10.0, 12.0), (20.0, 25.0)]  # start=10 落在首个人声区间，其 end=12
+        result = segment_sentences(words, speech=speech, max_seconds_per_char=0.5)
+        assert abs(result[0]["end"] - 12.0) < 1e-6  # 夹到人声边界，而非字符速率的 10+4.5=14.5
+        assert result[0]["start"] == 10.0  # 起点不动
+        assert result[0]["text"] == text  # 文本不动
+
+    def test_vad_falls_back_to_char_rate_when_no_match(self):
+        # start 在所有人声区间之后 → VAD 帮不上 → 回退字符速率收缩
+        text = "あいうえおかきく"  # 8 字
+        words = [_word(text, 100.0, 140.0)]  # 虚高
+        speech = [(10.0, 20.0), (30.0, 40.0)]  # 都在 100 之前
+        result = segment_sentences(words, speech=speech, max_seconds_per_char=0.5)
+        # 回退到字符速率：8 * 0.5 = 4s
+        assert abs(result[0]["end"] - result[0]["start"] - 4.0) < 1e-6
+
+    def test_vad_ignored_when_not_inflated(self):
+        # 非虚高句（ratio 未超 vad_ratio_threshold）：不动 VAD、保持原时长
+        text = "ふつうのはやさ"  # 7 字 / 5s ≈ 0.71s/字 < 1.0 阈值
+        words = [_word(text, 0.0, 5.0)]
+        speech = [(0.0, 2.0)]  # 即便有人声边界也不该夹
+        result = segment_sentences(words, speech=speech, max_seconds_per_char=10.0)
+        assert abs(result[0]["end"] - result[0]["start"] - 5.0) < 1e-6
+
+    def test_vad_none_preserves_char_rate_behavior(self):
+        # speech=None（短音频跳过 VAD / 未传）：行为与引入 VAD 前完全一致（走字符速率）
+        text = "さくらぜサクラゼさん39か月。"
+        words = [_word(text, 266.0, 280.0)]
+        with_none = segment_sentences(words, speech=None, max_seconds_per_char=0.5)
+        # 与不传 speech 参数等价
+        assert with_none[0]["end"] - with_none[0]["start"] <= len(text) * 0.5 + 1e-6
+
+    def test_vad_skips_when_boundary_outside_span(self):
+        # VAD 人声 end 不落在 (start, end) 内（如人声边界 > 虚高 end）→ 不夹、回退字符速率
+        text = "あいうえお"  # 5 字
+        words = [_word(text, 10.0, 18.0)]  # 虚高（ratio=1.6）
+        speech = [(10.0, 50.0)]  # 人声 end=50 > chunk end=18，夹了反而拉长 → 应跳过
+        result = segment_sentences(words, speech=speech, max_seconds_per_char=0.5)
+        # 回退字符速率：5 * 0.5 = 2.5s（不会被拉到 50）
+        assert abs(result[0]["end"] - result[0]["start"] - 2.5) < 1e-6
+
+
+class TestVadVoiceEnd:
+    def test_start_inside_interval_returns_its_end(self):
+        speech = [(10.0, 20.0), (30.0, 40.0)]
+        starts = [10.0, 30.0]
+        assert _vad_voice_end(speech, starts, 15.0) == 20.0  # 15 落在 [10,20)
+
+    def test_start_between_intervals_returns_next_end(self):
+        speech = [(10.0, 20.0), (30.0, 40.0)]
+        starts = [10.0, 30.0]
+        assert _vad_voice_end(speech, starts, 25.0) == 40.0  # 25 在间隙→取后继 [30,40] 的 end
+
+    def test_start_after_all_returns_none(self):
+        speech = [(10.0, 20.0)]
+        starts = [10.0]
+        assert _vad_voice_end(speech, starts, 30.0) is None  # 之后无人声区间
+
+    def test_start_at_interval_start(self):
+        speech = [(10.0, 20.0)]
+        starts = [10.0]
+        assert _vad_voice_end(speech, starts, 10.0) == 20.0  # 正好落在区间起点
+
+    def test_empty_speech_returns_none(self):
+        assert _vad_voice_end([], [], 5.0) is None
 
     def test_min_duration_floor_for_near_zero_chunk(self):
         # kotoba 偶尔把短 chunk 的 start/end 挤在一点（end-start≈0.04s），

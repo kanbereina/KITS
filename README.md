@@ -187,6 +187,7 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | `--max-gap` | `0.7` | 判定断句的最大停顿（秒），越小切得越碎 |
 | `--max-chars` | `60` | 单条字幕最大字符数 |
 | `--max-duration` | `15.0` | 单条字幕最大时长（秒） |
+| `--max-seconds-per-char` | `0.5` | 单条字幕每字符最大时长（秒），收缩 kotoba 虚高的字幕时长（详见下方「修正时间戳漂移」）；`<=0` 关闭 |
 | `--target-chunk` | `300.0` | 分段目标时长（秒），长音频每段约这么长 |
 | `--max-chunk` | `600.0` | 单段硬上限（秒），段内无人声间隙时在此强切 |
 | `--vad-threshold` | `0.5` | VAD 语音概率阈值（0~1），高于此算人声；越大越严格（检出人声更少、间隙更多） |
@@ -230,6 +231,17 @@ uv run kits subtitle -i live.mp3 --no-punctuate
 ```
 
 首次运行会下载标点模型（约 1GB）。标点模型在 CPU 上即可快速推理。
+
+#### 修正时间戳漂移（默认开启）
+
+kotoba 蒸馏模型有个固有毛病：**短语的结束时间戳常虚高**，end 会溢出到人声结束之后的静音里——十来个字的短句被标成几十秒，字幕在播放器里迟迟不消失、甚至盖过下一句造成时间倒退。
+
+为此对明显偏长的字幕做两级收缩，**只缩短显示时长、不改文本与起点**，按可靠性分工：
+
+1. **VAD 人声边界**（首选）：长音频转录时已探出的人声区间是真实测量值。对极虚高的字幕（每字符时长超过 `1.0` 秒），直接把 end 夹回「人声实际结束处」。实测这比单纯按语速估算更贴近真实结尾（误差 0.1~0.3 秒 vs 2.5~3.5 秒）。
+2. **字符速率**（兜底）：VAD 对不上时（如短音频没跑 VAD、或人声边界落在句外），改按 `--max-seconds-per-char`（每字符最多 0.5 秒，日语正常语速 ≥2 字/秒）估算朗读时长上限收缩。
+
+两者互斥、择一生效，对正常语速的字幕都不动。VAD 修正在**已分离人声**（`--separate` 或先用 `separate` 子命令）上最准，原始音频里 BGM / 唱歌会干扰人声边界判定。`--max-seconds-per-char` 设 `<=0` 可关闭字符速率兜底（此时仅保留 `--max-duration` 硬上限）。
 
 #### 长音频分段转录
 
@@ -418,7 +430,7 @@ src/kits/
   filters.py       # 纯逻辑：剔除游戏内系统播报 / 技能语音（无 torch 依赖，可单测）
   llm.py           # 公共 OpenAI 兼容 LLM 客户端：base_url + 鉴权 + HTTP + 错误处理（仅 httpx，translate/sum 共用）
   transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按 VAD 人声间隙切分、分段流式产出 chunk 级时间戳
-  vad.py           # 语音活动检测：Silero VAD 探人声区间、反推非语音间隙作切点（延迟导入 torch/silero-vad）
+  vad.py           # 语音活动检测：Silero VAD 探人声区间，作分段切点 + 修正字幕时间戳漂移（延迟导入 torch/silero-vad）
   punctuator.py    # 标点恢复：给无标点的转录 chunk 补日语句读（延迟导入 punctuators），时间戳不变
   downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
   translator.py    # 把日语 SRT 翻译成中文 SRT（经 llm 客户端，默认 DeepSeek）
@@ -434,7 +446,7 @@ main.py            # 薄入口，委托给 kits.cli
 
 - `downloader.TwitchDownloader` 下载并合并直播，产出 MP4 / MP3，不依赖 torch
 - `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；长音频走 `plan_audio()`（VAD 探人声间隙、规划分段）+ `transcribe_segments()`（逐段流式产出）
-- `vad.VADetector.detect_gaps()` 用 Silero VAD 探人声区间、反推非语音间隙喂给分段规划（延迟导入重依赖）
+- `vad.VADetector.detect_speech()` 用 Silero VAD 探人声区间：取补集得非语音间隙喂分段规划，并作真实人声边界把 kotoba 虚高的字幕 end 夹回（延迟导入重依赖）
 - `punctuator.Punctuator.restore()` 给无标点的 chunk 补日语句读，时间戳不变（延迟导入重依赖）
 - `subtitle.segment_sentences()` 负责断句、`write_srt()` / `SrtWriter` 负责落盘（后者支持分段增量写）、`parse_srt()` 负责把 SRT 读回句子列表
 - `llm.LLMClient` 集中 OpenAI 兼容端点的鉴权与请求（默认 DeepSeek，可配 `--base-url`）；`translator.LLMTranslator` 与 `summarizer.Summarizer` 复用它

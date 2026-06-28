@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import shutil
@@ -187,6 +188,7 @@ class VocalSeparator:
         segment_minutes: float = 15.0,
         output_bitrate: str | None = None,
         cache_dir: str = ".cache",
+        verbose: bool = False,
     ):
         self.output_dir = output_dir
         # 所有中间产物（切片、底层分离出的裸 WAV）统一落在此目录下的临时工作目录，
@@ -203,6 +205,10 @@ class VocalSeparator:
         # 最终输出比特率（如 "128k"）。None=自动对齐原音频（向上取整到 2 的幂 kbps）。
         # 仅对有损输出格式（MP3/AAC 等）生效；无损格式忽略。
         self.output_bitrate = output_bitrate
+        # 日志噪音开关，跟随 CLI 的 --verbose。audio-separator 的 separator/common_separator/
+        # mdx_separator 共用一个 logger（子分离器都拿 Separator.logger），故 load() 里给
+        # Separator 传 log_level 一处即可压住全部 INFO/WARNING 文本日志。默认静默。
+        self.verbose = verbose
         self._sep = None
 
     def load(self) -> None:
@@ -227,6 +233,10 @@ class VocalSeparator:
             "output_dir": str(Path(self.cache_dir)),
             "output_format": "WAV",
             "output_single_stem": "Vocals",
+            # 跟随 --verbose：静默(默认)给 ERROR 压掉 separator/common_separator/mdx_separator
+            # 的 INFO/WARNING 文本日志（三者共用此 logger）；verbose 给 INFO 放行全部。
+            # tqdm 进度条独立于 logging、不受影响，照常保留（separate 无 KITS 自有进度条，留作反馈）。
+            "log_level": logging.INFO if self.verbose else logging.ERROR,
         }
         if self.model_file_dir is not None:
             kwargs["model_file_dir"] = self.model_file_dir
