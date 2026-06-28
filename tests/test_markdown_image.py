@@ -12,8 +12,13 @@ from kits.markdown_image import (
 )
 
 
+def _require_markdown_it() -> None:
+    pytest.importorskip("markdown_it", reason="Markdown 解析测试需要安装 markdown-it-py")
+
+
 class TestBuildMarkdownHtml:
     def test_renders_markdown_to_html_document(self):
+        _require_markdown_it()
         html = build_markdown_html(
             "# まとめ\n\n- こんにちは\n- 歌います\n\n| 時間 | 内容 |\n| --- | --- |\n| 00:01 | 雑談 |",
             title="live.summary.md",
@@ -27,12 +32,14 @@ class TestBuildMarkdownHtml:
         assert "live.summary.md" in html
 
     def test_escapes_raw_html(self):
+        _require_markdown_it()
         html = build_markdown_html("<script>alert(1)</script>")
 
         assert "<script>" not in html
         assert "&lt;script&gt;" in html
 
     def test_supports_dark_theme(self):
+        _require_markdown_it()
         html = build_markdown_html("# 标题", theme="dark")
 
         assert "color-scheme: dark" in html
