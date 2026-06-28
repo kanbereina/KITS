@@ -241,7 +241,7 @@ uv run kits subtitle -i live.mp3 --no-punctuate
 
 好处：实时显示 `转录第 i/N 段` 进度、边转边落盘（中途中断已转部分仍是合法 SRT）、峰值显存更低。切点都落在无人说话处，**不会把句子拦腰截断，精度与整段转录一致**。短音频则自动整段转录，无额外开销。
 
-> VAD 能区分「人声 vs 音乐/噪音」，鹿乃直播常有唱歌 / BGM，这些虽不是静音，VAD 仍能在其间找到真正的人声间隙下刀，切点质量优于纯音量阈值。若想让某段更易切开，可调小 `--vad-threshold`（更易判为人声、间隙更集中）或调大 `--max-chunk` 容忍更长的段。VAD 跟随转录设备：CUDA 上复用 GPU 提速，其余走 CPU（极轻量）。
+> VAD 能区分「人声 vs 音乐/噪音」，鹿乃直播常有唱歌 / BGM，这些虽不是静音，VAD 仍能在其间找到真正的人声间隙下刀，切点质量优于纯音量阈值。若想让某段更易切开，可调小 `--vad-threshold`（更易判为人声、间隙更集中）或调大 `--max-chunk` 容忍更长的段。VAD 固定走 CPU（每窗口极轻量，4 小时音频约 2 分钟扫完），不抢转录显存，扫描时显示 `VAD 扫描 N%` 进度。
 
 #### 剔除游戏播报（--filter-game）
 
@@ -433,7 +433,7 @@ main.py            # 薄入口，委托给 kits.cli
 各模块职责清晰、相互解耦:
 
 - `downloader.TwitchDownloader` 下载并合并直播，产出 MP4 / MP3，不依赖 torch
-- `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；`transcribe_segmented()` 按 VAD 人声间隙切分长音频、分段流式产出
+- `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；长音频走 `plan_audio()`（VAD 探人声间隙、规划分段）+ `transcribe_segments()`（逐段流式产出）
 - `vad.VADetector.detect_gaps()` 用 Silero VAD 探人声区间、反推非语音间隙喂给分段规划（延迟导入重依赖）
 - `punctuator.Punctuator.restore()` 给无标点的 chunk 补日语句读，时间戳不变（延迟导入重依赖）
 - `subtitle.segment_sentences()` 负责断句、`write_srt()` / `SrtWriter` 负责落盘（后者支持分段增量写）、`parse_srt()` 负责把 SRT 读回句子列表
