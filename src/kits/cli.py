@@ -362,14 +362,16 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
     if punctuator is not None:
         punctuator.load()
 
-    # 规划阶段：探时长 + （长音频）VAD 扫描 + 分段，在进度条创建之前完成。VAD 模型加载与
+    # 规划阶段：探时长 + （长音频）VAD 扫描 + 分段，在转录进度条创建之前完成。VAD 模型加载与
     # 全程扫描耗时可观，放进度条之前跑完，其日志才不会冲乱进度条（与模型提前 load 同理）。
+    # 传 _make_bar 让 VAD 扫描自带一个 0~100% 进度条（与转录进度条顺序出现、互不冲突）。
     duration, segments = transcriber.plan_audio(
         audio_file,
         target_chunk=args.target_chunk,
         max_chunk=args.max_chunk,
         vad_threshold=args.vad_threshold,
         min_silence=args.min_silence,
+        make_bar=_make_bar,
     )
 
     # 转录进度条按音频秒数推进，量程已知（plan_audio 已探得 duration），直接满量程建条。

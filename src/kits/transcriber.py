@@ -30,7 +30,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from kits.subtitle import Word
@@ -414,13 +414,14 @@ class Transcriber:
         max_chunk: float = 600.0,
         vad_threshold: float = 0.5,
         min_silence: float = 0.5,
+        make_bar: Callable[..., object] | None = None,
     ) -> tuple[float, list[tuple[float, float]]]:
         """规划分段：探总时长，长音频再用 VAD 探人声间隙、plan_segments 切段。
 
         返回 (duration, segments)。这是转录前的「规划阶段」，应在转录进度条创建**之前**
         调用——VAD 模型加载与全程扫描耗时可观，放进度条之前跑完，其日志才不会冲乱进度条
-        （与 transcriber/punctuator 模型提前 load 同理）。故这里用普通 print 输出，含 VAD
-        百分比进度。短音频（<= max_chunk）跳过 VAD，直接返回单段 [(0, duration)]。
+        （与 transcriber/punctuator 模型提前 load 同理）。短音频（<= max_chunk）跳过 VAD，
+        直接返回单段 [(0, duration)]。
 
         切点来源：用 Silero VAD（见 kits.vad）探出人声区间、反推非语音间隙，交给
         plan_segments 在 (target_chunk, max_chunk) 窗口内挑最长间隙中点切。VAD 能区分
@@ -429,6 +430,9 @@ class Transcriber:
 
         vad_threshold: VAD 语音概率阈值（0~1），高于此算人声；越大越严格。
         min_silence: 短于此（秒）的停顿并入人声、不算间隙；越大间隙越少、段越接近整段。
+        make_bar: 可选进度条工厂（cli 传 _make_bar），签名 (total, desc, unit)->tqdm。
+            传入则 VAD 全程扫描用一个 0~100% 进度条展示；不传则回退逐 10% 打印
+            （便于无终端环境 / 测试）。transcriber 不直接依赖 tqdm，只收工厂、保持解耦。
         """
         duration = probe_duration(audio_file)
         print(f"\n🎵 音频总时长: {duration:.1f}s（约 {duration / 60:.1f} 分钟）")
@@ -450,17 +454,35 @@ class Transcriber:
         detector = VADetector(
             threshold=vad_threshold, min_silence=min_silence, device="cpu"
         )
-        # VAD 要扫全程、长音频耗时可观，接 silero 的进度回调避免看似卡死。silero 每窗口
-        # （可达数十万次）都回调一次，节流到每 10% 打一行（进度条尚未创建，用普通 print）。
-        last_pct = [-1]
+        # 先单独 load()，让 VAD 模型加载日志在进度条创建之前打完，避免冲乱进度条。
+        detector.load()
+
+        # VAD 要扫全程、长音频耗时可观，用 0~100% 进度条展示（silero 每窗口都回调，节流到
+        # 整数百分比变化才推进）。无进度条工厂时回退逐 10% 打印（无终端 / 测试）。
+        if make_bar is not None:
+            vad_bar = make_bar(total=100.0, desc="🔍 VAD 扫描", unit="%")
+        else:
+            vad_bar = None
+        # 初值 0：进度条从 0 建，第一次 p=0 的回调跳过（否则 update(0-(-1)) 会多推 1 格→101%）
+        last_pct = [0]
 
         def _vad_progress(pct: float) -> None:
             p = int(pct)
-            if p > last_pct[0] and p % 10 == 0:
-                last_pct[0] = p
+            if p <= last_pct[0]:
+                return
+            if vad_bar is not None:
+                # noinspection PyUnresolvedReferences
+                vad_bar.update(p - last_pct[0])  # tqdm 收增量
+            elif p % 10 == 0:
                 print(f"  VAD 扫描 {p}%")
+            last_pct[0] = p
 
-        gaps = detector.detect_gaps(audio_file, duration, progress=_vad_progress)
+        try:
+            gaps = detector.detect_gaps(audio_file, duration, progress=_vad_progress)
+        finally:
+            if vad_bar is not None:
+                # noinspection PyUnresolvedReferences
+                vad_bar.close()
         print(f"  找到 {len(gaps)} 段非语音间隙")
         segments = plan_segments(duration, gaps, target_chunk, max_chunk)
         print(f"✂️  规划为 {len(segments)} 段")
