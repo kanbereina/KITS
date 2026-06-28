@@ -14,13 +14,14 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-"""命令行入口：子命令 download / subtitle / translate / separate / summarize（各带简写别名）。
+"""命令行入口：子命令 download / subtitle / translate / separate / summarize / render-image。
 
 download:  下载 Twitch 直播 -> 合并 MP4 -> 可选 MP3 / SRT
 subtitle:  已有音频 -> SRT 字幕（可选 --separate 先分离人声）
 translate: 日语 SRT -> 中文 SRT（AI 翻译）
 separate:  从音频分离出人声（audio-separator）
 sum:       已有 SRT -> AI 总结（提示词走 JSON 预设）
+render-image: Markdown -> PNG 图片
 """
 
 from __future__ import annotations
@@ -287,7 +288,34 @@ def build_parser() -> argparse.ArgumentParser:
         default=8000,
         help="单块送审的最大字符数，超长字幕按此分块总结",
     )
+    sm.add_argument(
+        "--render-image",
+        action="store_true",
+        help="总结 Markdown 写盘后同时渲染 PNG 图片（需 uv sync --extra image + playwright install chromium）",
+    )
+    sm.add_argument("--image-output", default=None, help="总结图片输出路径(默认与 Markdown 同名 .png)")
+    sm.add_argument("--image-width", type=int, default=1200, help="总结图片正文宽度(px)，默认 1200")
+    sm.add_argument(
+        "--image-theme",
+        choices=("light", "dark"),
+        default="light",
+        help="总结图片主题，默认 light",
+    )
+    sm.add_argument("--image-scale", type=float, default=2.0, help="截图缩放比例，默认 2.0")
     sm.set_defaults(func=_run_sum)
+
+    # --- render-image 子命令 ---
+    img = sub.add_parser(
+        "render-image", aliases=["img"], parents=[verbose_parent],
+        help="把 Markdown 文件渲染成 PNG 图片",
+    )
+    img.add_argument("-i", "--input", required=True, help="输入 Markdown 文件(必填)")
+    img.add_argument("-o", "--output", default=None, help="输出 PNG(默认与 Markdown 同名 .png)")
+    img.add_argument("--width", type=int, default=1200, help="图片正文宽度(px)，默认 1200")
+    img.add_argument("--theme", choices=("light", "dark"), default="light", help="图片主题，默认 light")
+    img.add_argument("--scale", type=float, default=2.0, help="截图缩放比例，默认 2.0")
+    img.add_argument("--title", default=None, help="图片顶部小标题(可选)")
+    img.set_defaults(func=_run_render_image)
 
     return parser
 
@@ -579,9 +607,57 @@ def _run_sum(args: argparse.Namespace) -> None:
     output_path.write_text(summary, encoding="utf-8")
 
     print(f"\n✅ 总结已保存到: {output_path}")
+    if args.render_image:
+        image_path = _render_markdown_file_to_image(
+            output_path,
+            output=args.image_output,
+            width=args.image_width,
+            theme=args.image_theme,
+            scale=args.image_scale,
+            title=input_path.name,
+        )
+        print(f"🖼️  总结图片已保存到: {image_path}")
     print("\n📝 总结预览:")
     preview = summary[:500] + ("..." if len(summary) > 500 else "")
     print(preview)
+
+
+def _render_markdown_file_to_image(
+    input_path: Path,
+    *,
+    output: str | None,
+    width: int,
+    theme: str,
+    scale: float,
+    title: str | None = None,
+) -> Path:
+    from kits.markdown_image import MarkdownImageError, default_image_output_path, render_markdown_to_image
+
+    if not input_path.is_file():
+        raise FileNotFoundError(f"找不到输入 Markdown 文件: {input_path}")
+    output_path = Path(output) if output else default_image_output_path(input_path)
+    markdown = input_path.read_text(encoding="utf-8")
+    try:
+        return render_markdown_to_image(markdown, output_path, width=width, theme=theme, title=title, scale=scale)
+    except MarkdownImageError as e:
+        raise SystemExit(f"❌ 图片渲染失败: {e}") from e
+
+
+def _run_render_image(args: argparse.Namespace) -> None:
+    print("=" * 60)
+    print("🖼️  Markdown 渲染图片")
+    print("=" * 60)
+
+    input_path = Path(args.input)
+    image_path = _render_markdown_file_to_image(
+        input_path,
+        output=args.output,
+        width=args.width,
+        theme=args.theme,
+        scale=args.scale,
+        title=args.title or input_path.name,
+    )
+    print(f"\n✅ 图片已保存到: {image_path}")
 
 
 def main(argv: list[str] | None = None) -> None:

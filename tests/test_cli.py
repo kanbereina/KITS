@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kits.cli import _make_bar
+from kits.cli import _make_bar, build_parser
 
 
 class TestMakeBar:
@@ -46,3 +46,58 @@ class TestMakeBar:
             assert "转录进度" in bar.desc
         finally:
             bar.close()
+
+
+class TestRenderImageParser:
+    def test_render_image_defaults(self):
+        args = build_parser().parse_args(["render-image", "-i", "summary.md"])
+
+        assert args.input == "summary.md"
+        assert args.output is None
+        assert args.width == 1200
+        assert args.theme == "light"
+        assert args.scale == 2.0
+
+    def test_render_image_accepts_options(self):
+        args = build_parser().parse_args(
+            [
+                "img",
+                "-i",
+                "summary.md",
+                "-o",
+                "summary.png",
+                "--width",
+                "900",
+                "--theme",
+                "dark",
+                "--scale",
+                "1.5",
+                "--title",
+                "直播总结",
+            ]
+        )
+
+        assert args.output == "summary.png"
+        assert args.width == 900
+        assert args.theme == "dark"
+        assert args.scale == 1.5
+        assert args.title == "直播总结"
+
+    def test_summarize_accepts_render_image_options(self):
+        args = build_parser().parse_args(
+            [
+                "summarize",
+                "-i",
+                "live.srt",
+                "--render-image",
+                "--image-output",
+                "live.png",
+                "--image-theme",
+                "dark",
+            ]
+        )
+
+        assert args.render_image is True
+        assert args.image_output == "live.png"
+        assert args.image_theme == "dark"
+        assert args.image_width == 1200
