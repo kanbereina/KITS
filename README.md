@@ -31,7 +31,6 @@ _鹿乃 Twitch 直播智能总结_
   - [translate：日语字幕译中文](#translate日语字幕译中文)
   - [separate：分离人声](#separate分离人声)
   - [summarize：AI 总结字幕](#summarizeai-总结字幕)
-  - [render-image：Markdown 渲染图片](#render-imagemarkdown-渲染图片)
   - [示例](#示例)
 - [项目结构](#项目结构)
 - [断句逻辑](#断句逻辑)
@@ -110,7 +109,7 @@ export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY
 
 **5.（可选）安装总结图片渲染依赖**
 
-`render-image` 和 `summarize --render-image` 通过 HTML + 浏览器截图生成 PNG，需要安装可选的 Playwright 依赖和 Chromium 浏览器：
+`summarize --render-image` 通过 Markdown → HTML → 浏览器截图生成 PNG，需要安装可选的 Markdown / Playwright 依赖和 Chromium 浏览器：
 
 ```bash
 uv sync --extra image
@@ -126,11 +125,11 @@ uv run --extra image playwright install chromium
 | CUDA | 12.8（仅 Nvidia） | Linux/Win 的 PyTorch 从 `pytorch-cu128` 源安装，勿换 PyPI 默认源；macOS 不需要 |
 | ffmpeg | 在 PATH 中 | 合并 MP4、提取 MP3、音频切分 |
 | API Key | 大模型（可选） | 仅 `translate` / `summarize` 需要，默认 DeepSeek |
-| Playwright + Chromium | 可选 | 仅 `render-image` / `summarize --render-image` 需要，用于 HTML 截图 |
+| markdown-it-py + Playwright + Chromium | 可选 | 仅 `summarize --render-image` 需要，用于 Markdown 渲染与 HTML 截图 |
 
 ## 使用方法
 
-工具提供六个子命令：`download`（下载直播）、`subtitle`（音频转字幕）、`translate`（日语字幕译中文）、`separate`（人声分离）、`summarize`（AI 总结字幕）和 `render-image`（Markdown 渲染图片）。每个命令都带一个简写别名，可互换使用。
+工具提供五个子命令：`download`（下载直播）、`subtitle`（音频转字幕）、`translate`（日语字幕译中文）、`separate`（人声分离）和 `summarize`（AI 总结字幕）。每个命令都带一个简写别名，可互换使用。
 
 | 命令 | 别名 | 用途 | 最简示例 | 需 GPU | 需 API Key |
 | --- | --- | --- | --- | :---: | :---: |
@@ -139,7 +138,6 @@ uv run --extra image playwright install chromium
 | [`translate`](#translate日语字幕译中文) | `tr` | 日语 SRT 翻译成中文 SRT | `uv run kits tr -i live.srt` | 否 | 是 |
 | [`separate`](#separate分离人声) | `sep` | 从音频分离出人声，去 BGM / 伴奏 | `uv run kits sep -i audio.mp3` | 是 | 否 |
 | [`summarize`](#summarizeai-总结字幕) | `sum` | 对 SRT 做 AI 总结（时间线 / 歌单等） | `uv run kits sum -i live.srt` | 否 | 是 |
-| [`render-image`](#render-imagemarkdown-渲染图片) | `img` | 把 Markdown 渲染为 PNG 分享图 | `uv run --extra image kits img -i live.summary.md` | 否 | 否 |
 
 > ¹ `download` 本身不需要 GPU；但加 `--srt`（下载后自动转字幕）会调用 Whisper，需要 GPU。
 
@@ -384,39 +382,6 @@ uv run kits summarize -i live.srt --prompt-file my_prompts.json --preset mine
 | `--image-scale` | `2.0` | 浏览器截图缩放比例，数值越大图片越清晰也越大 |
 
 > 自定义提示词 JSON 格式：顶层 `presets` 是「预设名 → {description, system}」字典，可选 `default`（默认预设名）和 `reduce_system`（多块合并时的提示词）。用户预设与内置预设浅合并，同名覆盖。
-
-### render-image：Markdown 渲染图片
-
-把已有 Markdown 文件渲染成 PNG 图片，适合把 `summarize` 输出的 `.summary.md` 转成可分享长图。实现路径是 **Markdown → HTML → Chromium 截图**，不是用图片库直接绘制 Markdown；这样浏览器负责文字排版、表格、列表和中日文字体回退。
-
-首次使用先安装可选依赖和浏览器：
-
-```bash
-uv sync --extra image
-uv run --extra image playwright install chromium
-```
-
-常用命令：
-
-```bash
-# 默认输出 live.summary.png
-uv run --extra image kits render-image -i live.summary.md
-
-# 用别名 img，指定深色主题和宽度
-uv run --extra image kits img -i live.summary.md --theme dark --width 1000
-
-# 也可以在 summarize 阶段直接生成图片
-uv run --extra image kits summarize -i live.srt --render-image --image-theme dark
-```
-
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `-i, --input` | （必填） | 输入 Markdown 文件路径 |
-| `-o, --output` | `输入文件同名 .png` | 输出 PNG 文件路径 |
-| `--width` | `1200` | 图片正文宽度（px） |
-| `--theme` | `light` | 图片主题，可选 `light` / `dark` |
-| `--scale` | `2.0` | 浏览器截图缩放比例 |
-| `--title` | 输入文件名 | 图片顶部小标题 |
 
 ### 接入其他 OpenAI 兼容端点
 

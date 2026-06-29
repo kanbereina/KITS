@@ -17,7 +17,6 @@ dependencies = [
     "audio-separator[cpu]>=0.44.0 ; sys_platform == 'darwin'",
     "httpx>=0.28.1",
     "huggingface-hub>=1.19.0",
-    "markdown-it-py>=4.2.0",
     "onnxruntime-gpu>=1.26.0 ; sys_platform != 'darwin'",
     "punctuators>=0.0.7",
     "pydantic>=2.13.4",
@@ -30,6 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 image = [
+    "markdown-it-py>=4.2.0",
     "playwright>=1.60.0",
 ]
 

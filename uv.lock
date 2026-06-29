@@ -647,7 +647,6 @@ dependencies = [
     { name = "audio-separator", extra = ["gpu"], marker = "sys_platform != 'darwin'" },
     { name = "httpx" },
     { name = "huggingface-hub" },
-    { name = "markdown-it-py" },
     { name = "onnxruntime-gpu", marker = "sys_platform != 'darwin'" },
     { name = "punctuators" },
     { name = "pydantic" },
@@ -662,6 +661,7 @@ dependencies = [
 
 [package.optional-dependencies]
 image = [
+    { name = "markdown-it-py" },
     { name = "playwright" },
 ]
 
@@ -677,7 +677,7 @@ requires-dist = [
     { name = "audio-separator", extras = ["gpu"], marker = "sys_platform != 'darwin'", specifier = ">=0.44.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "huggingface-hub", specifier = ">=1.19.0" },
-    { name = "markdown-it-py", specifier = ">=4.2.0" },
+    { name = "markdown-it-py", marker = "extra == 'image'", specifier = ">=4.2.0" },
     { name = "onnxruntime-gpu", marker = "sys_platform != 'darwin'", specifier = ">=1.26.0" },
     { name = "playwright", marker = "extra == 'image'", specifier = ">=1.60.0" },
     { name = "punctuators", specifier = ">=0.0.7" },
