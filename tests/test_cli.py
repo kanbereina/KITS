@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from kits.cli import _make_bar
+import argparse
+from pathlib import Path
+
+import pytest
+
+from kits import cli as cli_module
+from kits.cli import _make_bar, build_parser
 
 
 class TestMakeBar:
@@ -46,3 +52,104 @@ class TestMakeBar:
             assert "转录进度" in bar.desc
         finally:
             bar.close()
+
+
+class TestRenderImageParser:
+    def test_render_image_command_is_not_public(self):
+        with pytest.raises(SystemExit):
+            build_parser().parse_args(["render-image", "-i", "summary.md"])
+
+    def test_summarize_accepts_render_image_options(self):
+        args = build_parser().parse_args(
+            [
+                "summarize",
+                "-i",
+                "live.srt",
+                "--render-image",
+                "--image-output",
+                "live.png",
+                "--image-theme",
+                "dark",
+            ]
+        )
+
+        assert args.render_image is True
+        assert args.image_output == "live.png"
+        assert args.image_theme == "dark"
+        assert args.image_width == 1200
+
+
+class TestSummarizeRenderImage:
+    @staticmethod
+    def _args(input_path: Path, output_path: Path) -> argparse.Namespace:
+        return argparse.Namespace(
+            input=str(input_path),
+            output=str(output_path),
+            api_key=None,
+            base_url=None,
+            model="deepseek-chat",
+            preset=None,
+            prompt_file=None,
+            max_chars=8000,
+            render_image=True,
+            image_output=None,
+            image_width=1200,
+            image_theme="light",
+            image_scale=2.0,
+        )
+
+    @staticmethod
+    def _write_srt(path: Path) -> None:
+        path.write_text("1\n00:00:00,000 --> 00:00:01,000\nこんにちは\n", encoding="utf-8")
+
+    def test_summarize_render_image_uses_summary_filename_as_title(self, tmp_path, monkeypatch):
+        input_path = tmp_path / "live.srt"
+        output_path = tmp_path / "live.summary.md"
+        self._write_srt(input_path)
+        seen: dict[str, object] = {}
+
+        class FakeSummarizer:
+            def __init__(self, **kwargs):
+                pass
+
+            def summarize(self, sentences):
+                return "# まとめ"
+
+        def fake_render(input_path, *, output, width, theme, scale, title):
+            seen["input_path"] = input_path
+            seen["title"] = title
+            return tmp_path / "live.summary.png"
+
+        monkeypatch.setattr("kits.summarizer.Summarizer", FakeSummarizer)
+        monkeypatch.setattr(cli_module, "_render_markdown_file_to_image", fake_render)
+
+        cli_module._run_sum(self._args(input_path, output_path))
+
+        assert seen["input_path"] == output_path
+        assert seen["title"] == "live.summary.md"
+        assert output_path.read_text(encoding="utf-8") == "# まとめ"
+
+    def test_summarize_render_image_failure_keeps_summary_successful(self, tmp_path, monkeypatch, capsys):
+        input_path = tmp_path / "live.srt"
+        output_path = tmp_path / "live.summary.md"
+        self._write_srt(input_path)
+
+        class FakeSummarizer:
+            def __init__(self, **kwargs):
+                pass
+
+            def summarize(self, sentences):
+                return "# まとめ"
+
+        def fake_render(*args, **kwargs):
+            raise RuntimeError("Chromium 未安装")
+
+        monkeypatch.setattr("kits.summarizer.Summarizer", FakeSummarizer)
+        monkeypatch.setattr(cli_module, "_render_markdown_file_to_image", fake_render)
+
+        cli_module._run_sum(self._args(input_path, output_path))
+
+        out = capsys.readouterr().out
+        assert "总结图片渲染失败" in out
+        assert "总结预览" in out
+        assert output_path.read_text(encoding="utf-8") == "# まとめ"
