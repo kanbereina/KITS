@@ -148,6 +148,16 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="标点恢复模型(默认 xlm-roberta 日语句读模型)",
     )
+    # 转录分段策略。默认走逐 VAD 人声窗口（锚定真实人声边界、根治前导静音漂移，对纯说话
+    # 场次对齐最佳）。但 silero VAD 对唱歌延音系统性漏判（持续长元音不被判为语音），那段
+    # 字幕会整段丢失——故歌枠等含大量唱歌的内容应改用 --full-transcribe（整段连续转、不丢
+    # 唱歌，代价是前导静音可能让首句时间戳偏早）。
+    parser.add_argument(
+        "--full-transcribe",
+        action="store_true",
+        help="整段连续转录（不丢唱歌延音；唱歌/歌枠用此模式）。"
+        "默认走逐 VAD 人声窗口（对齐更准但会丢唱歌延音字幕）",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -362,33 +372,39 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
     if punctuator is not None:
         punctuator.load()
 
-    # 规划阶段：探时长 + （长音频）VAD 扫描 + 分段，在转录进度条创建之前完成。VAD 模型加载与
-    # 全程扫描耗时可观，放进度条之前跑完，其日志才不会冲乱进度条（与模型提前 load 同理）。
-    # 传 _make_bar 让 VAD 扫描自带一个 0~100% 进度条（与转录进度条顺序出现、互不冲突）。
-    # speech 是 VAD 人声区间，透传给 segment_sentences 把 kotoba 虚高 end 夹回真实人声边界。
-    duration, segments, speech = transcriber.plan_audio(
-        audio_file,
-        target_chunk=args.target_chunk,
-        max_chunk=args.max_chunk,
-        vad_threshold=args.vad_threshold,
-        min_silence=args.min_silence,
-        make_bar=_make_bar,
-    )
-
-    # 转录进度条按音频秒数推进，量程已知（plan_audio 已探得 duration），直接满量程建条。
-    # 段号/累计条数收进进度条 desc/postfix，不再刷屏。
-    bar = _make_bar(total=duration, desc="🎬 转录进度", unit="s")
-    with SrtWriter(output_srt) as writer, bar:
-        segments_words = transcriber.transcribe_segments(
-            audio_file,
-            segments,
-            duration,
-            language=args.language,
-            beams=args.beams,
-            overlap=args.segment_overlap,
-            bar=bar,
+    # 规划阶段：在转录进度条创建之前完成（VAD 模型加载与全程扫描耗时可观，放进度条之前
+    # 跑完、日志才不冲乱进度条）。传 _make_bar 让 VAD 扫描自带 0~100% 进度条。
+    # speech 透传给 segment_sentences，把 kotoba 虚高 end 夹回真实人声边界（clamp 自我保护）。
+    if not getattr(args, "full_transcribe", False):
+        # 默认：逐 VAD 人声窗口转录（锚定真实人声边界、根治前导静音漂移，纯说话场次对齐最佳）。
+        # 注意：silero 对唱歌延音漏判 → 那段字幕丢失，歌枠应改用 --full-transcribe。
+        duration, windows = transcriber.plan_windows(audio_file, make_bar=_make_bar)
+        speech = windows  # 窗口即人声区间，复用作 clamp 的真实边界
+        bar = _make_bar(total=len(windows), desc="🎬 转录进度", unit="窗")
+        make_iter = lambda: transcriber.transcribe_windows(  # noqa: E731
+            audio_file, windows, duration,
+            language=args.language, beams=args.beams, bar=bar,
         )
-        for words in segments_words:
+    else:
+        # --full-transcribe：按非语音间隙切含静音的连续大段、整段连续转。不靠 VAD 决定转不转，
+        # 故不丢唱歌延音（kotoba 整段连续转能识别歌词）；代价是前导静音可能让首句时间戳偏早。
+        duration, segments, speech = transcriber.plan_audio(
+            audio_file,
+            target_chunk=args.target_chunk,
+            max_chunk=args.max_chunk,
+            vad_threshold=args.vad_threshold,
+            min_silence=args.min_silence,
+            make_bar=_make_bar,
+        )
+        bar = _make_bar(total=duration, desc="🎬 转录进度", unit="s")
+        make_iter = lambda: transcriber.transcribe_segments(  # noqa: E731
+            audio_file, segments, duration,
+            language=args.language, beams=args.beams,
+            overlap=args.segment_overlap, bar=bar,
+        )
+
+    with SrtWriter(output_srt) as writer, bar:
+        for words in make_iter():
             # 转录后、断句前补标点（时间戳不变），让 segment_sentences 能在句末标点处断句
             if punctuator is not None:
                 words = punctuator.restore(words)
@@ -407,8 +423,7 @@ def _audio_to_srt(audio_file: str, output_srt: str, args: argparse.Namespace) ->
                 filtered_total += removed
             total = writer.append(sentences)
             all_sentences.extend(sentences)
-            # 累计条数收进进度条右侧（postfix），与 transcriber 设的段号描述（desc）互不覆盖，
-            # 不再每段刷一行。需要逐段明细时加 --verbose（底层日志一并放行）。
+            # 累计条数收进进度条右侧（postfix），与 transcriber 设的段号描述（desc）互不覆盖
             bar.set_postfix_str(f"累计 {total} 条")
 
     if callouts is not None:
