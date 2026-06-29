@@ -33,6 +33,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - 默认模型 `kotoba-tech/kotoba-whisper-v2.2`（日语识别更准的蒸馏模型）。它只产 chunk 级时间戳、不带句末标点，故转录后默认走 `punctuator` 标点恢复再断句（`--no-punctuate` 关闭）。换用本身带 word 级时间戳 + 标点的模型时可关。
 - 合并 MP4、提取 MP3 依赖系统 `ffmpeg`，须在 PATH 中。
 - `translate` / `sum` 需要 LLM API Key，走 `--api-key` 或环境变量 `KITS_LLM_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY`。默认走 DeepSeek，可用 `--base-url`（或 `KITS_LLM_BASE_URL`）接入其他 OpenAI 兼容端点（OpenAI / Ollama / vLLM 等）；自定义端点允许空 Key。
+- `summarize --render-image` 需要可选 extra：先 `uv sync --extra image`，再 `uv run --extra image playwright install chromium`。实现是 Markdown → HTML → Chromium 截图；Markdown 解析与 Playwright 都在图片渲染路径内按需使用。
 - `separate` 依赖 `audio-separator[gpu]`（含 onnxruntime-gpu），首次运行会下载分离模型；同样要 CUDA GPU。
 - **onnxruntime GPU 加速的两个坑**（`.onnx`/MDX 模型走 onnxruntime，`.ckpt`/MDXC roformer 走 torch）：
   1. `punctuators` 间接依赖 **CPU 版 `onnxruntime`**，会和 `audio-separator[gpu]` 的 `onnxruntime-gpu` 装进同一个 `onnxruntime/` 目录、CPU 版 dll 顶掉 GPU 版，导致 `CUDAExecutionProvider` 丢失、`.onnx` 分离静默退回 CPU（慢数倍）。靠 `pyproject.toml` 的 `[tool.uv] override-dependencies = ["onnxruntime ; sys_platform == 'never'"]` 禁止 CPU 版被装入。改完需 `uv sync --reinstall-package onnxruntime-gpu` 恢复被覆盖的 GPU dll。
@@ -57,6 +58,7 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - `translator.py` — `LLMTranslator`，经 `llm.LLMClient` 把日语句子逐批译成中文。`TranslationError` 继承 `LLMError`。
 - `separator.py` — `VocalSeparator`，封装 audio-separator 分离人声（默认只出 Vocals 轨）。重依赖 audio-separator（含 torch/onnxruntime），**延迟导入**（`load()` 内才 import）。底层统一产出**无损 WAV** 作中间产物，最终格式/比特率由 `_encode_final` 用 ffmpeg 一次性套用。长音频按 `segment_minutes`（默认 15）切段→逐段分离→ffmpeg concat 合并，避免一次性出整轨爆内存。比特率默认对齐原音频（探音频流比特率 → 向上取整到 2 的幂 kbps、夹 [32,320]、留 5% 容差吸收 MP3 标称偏差），`--output-bitrate` 可覆盖；无损格式忽略比特率。
 - `summarizer.py` — `Summarizer`，经 `llm.LLMClient` 对 SRT 做 AI 总结。提示词走 JSON 预设（包内 `prompts.json` + 用户 `--prompt-file` 覆盖），长字幕 map-reduce 分块。纯逻辑（`load_presets` / `resolve_preset` / `format_sentences` / `chunk_sentences`）不触网、可单测。
+- `markdown_image.py` — 总结 Markdown 渲染图片。可选依赖 `markdown-it-py` 负责 Markdown → HTML；可选重依赖 Playwright 负责 Chromium 元素截图，**仅在图片渲染路径内导入/使用**。内置 light/dark HTML/CSS 主题和中日文字体栈。
 - `data/prompts.json` — 内置总结提示词预设（timeline / summary / highlights / setlist）+ `reduce_system` 合并提示词，随包发布（置于 `data/` 子目录与 .py 源码分离）。
 - `cli.py` — argparse 子命令 `download` / `subtitle` / `translate` / `separate` / `summarize`（分别带简写别名 `dl` / `srt` / `tr` / `sep` / `sum`），把各模块串成流水线。子命令用 `set_defaults(func=...)` 绑定处理函数，别名与规范名统一分发。
 
@@ -66,10 +68,11 @@ uv run pytest tests/test_subtitle.py::TestParseSrt  # 跑单个测试类
 - 译字幕：SRT 文件 → `subtitle.parse_srt()`(list[Sentence]) → `translator.translate()`(中文 list[Sentence]) → `subtitle.write_srt()`。
 - 分离人声：音频 →（长音频先按 `segment_minutes` 切段）→ `separator.VocalSeparator.separate()`（逐段分离出无损 WAV → ffmpeg concat 合并 → 按目标格式/比特率编码）→ 人声音频文件（可再交给 subtitle）。
 - 总结：SRT 文件 → `subtitle.parse_srt()` → `summarizer.format_sentences/chunk_sentences` → `summarizer.Summarizer.summarize()`（按预设逐块总结，多块再 reduce 合并）→ Markdown 文件。
+- 渲染图片：`summarize` 的 Markdown 结果 → `markdown_image.build_markdown_html()` 生成完整 HTML → Playwright Chromium 打开 HTML → 截 `.kits-card` 元素为 PNG。图片渲染是总结的可选附加产物，失败只打印 warning，不中断已写盘的 Markdown 总结。
 
 关键约定：
 
-- `cli.py` 中对 `transcriber` / `downloader` / `translator` / `separator` / `summarizer` / `punctuator` 用**延迟导入**（函数内 import），避免无谓加载 GPU 栈或网络栈。新增重依赖模块时沿用此模式。
+- `cli.py` 中对 `transcriber` / `downloader` / `translator` / `separator` / `summarizer` / `punctuator` / `markdown_image` 用**延迟导入**（函数内 import），避免无谓加载 GPU 栈、网络栈或浏览器栈。新增重依赖模块时沿用此模式。
 - LLM 调用统一走 `llm.LLMClient`（OpenAI 兼容，默认 DeepSeek），不要在 `translator` / `summarizer` 里重复写 HTTP / 鉴权。新增 LLM 能力时复用该客户端，领域逻辑（分批、提示词）留各自模块。
 - `download --srt` 隐含 `--mp3`（生成字幕必须先有音频），逻辑在 `_run_download` 的 `need_mp3 = args.mp3 or args.srt`。
 - 断句与分段参数（`--max-gap` / `--target-chunk` 等）由 `_add_subtitle_args` 在 download / subtitle 间共用。

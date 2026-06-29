@@ -58,6 +58,7 @@ _鹿乃 Twitch 直播智能总结_
 - 🔗 下载与字幕一条龙：一条命令从直播 URL 直达 SRT 字幕
 - 🌐 调用大模型把日语 SRT 翻译成中文 SRT，逐条对应、保留原时间轴（默认 DeepSeek，可接其他 OpenAI 兼容端点）
 - 🤖 调用大模型对 SRT 字幕做 AI 总结，提示词走 JSON 预设（时间线 / 概述 / 高光 / 歌单），长字幕自动分块（默认 DeepSeek，可接其他 OpenAI 兼容端点）
+- 🖼️ 可把总结 Markdown 渲染为分享图片：Markdown 先转 HTML，再由 Chromium 截图输出 PNG
 - 🎚️ 用 audio-separator 分离人声，可单独导出，也可在转录前 `--separate` 预处理去掉 BGM / 唱歌干扰
 - 🧹 自动清理重复字符与乱码，并抑制模型的幻觉式重复
 - 🎮 可选剔除 VALORANT 游戏内系统播报 / 技能语音（如「残り1名」「グレネード配置」），让字幕聚焦主播人声
@@ -106,6 +107,15 @@ export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY
 
 > 首次运行转字幕会自动从 Hugging Face 下载模型（kotoba-whisper 约几个 GB + 标点模型约 1GB），需要联网；之后走本地缓存。
 
+**5.（可选）安装总结图片渲染依赖**
+
+`summarize --render-image` 通过 Markdown → HTML → 浏览器截图生成 PNG，需要安装可选的 Markdown / Playwright 依赖和 Chromium 浏览器：
+
+```bash
+uv sync --extra image
+uv run --extra image playwright install chromium
+```
+
 ### 环境要求一览
 
 | 项 | 要求 | 说明 |
@@ -115,10 +125,11 @@ export DEEPSEEK_API_KEY=sk-xxxx      # Windows PowerShell: $env:DEEPSEEK_API_KEY
 | CUDA | 12.8（仅 Nvidia） | Linux/Win 的 PyTorch 从 `pytorch-cu128` 源安装，勿换 PyPI 默认源；macOS 不需要 |
 | ffmpeg | 在 PATH 中 | 合并 MP4、提取 MP3、音频切分 |
 | API Key | 大模型（可选） | 仅 `translate` / `summarize` 需要，默认 DeepSeek |
+| markdown-it-py + Playwright + Chromium | 可选 | 仅 `summarize --render-image` 需要，用于 Markdown 渲染与 HTML 截图 |
 
 ## 使用方法
 
-工具提供五个子命令:`download`（下载直播）、`subtitle`（音频转字幕）、`translate`（日语字幕译中文）、`separate`（人声分离）和 `summarize`（AI 总结字幕）。每个命令都带一个简写别名，可互换使用。
+工具提供五个子命令：`download`（下载直播）、`subtitle`（音频转字幕）、`translate`（日语字幕译中文）、`separate`（人声分离）和 `summarize`（AI 总结字幕）。每个命令都带一个简写别名，可互换使用。
 
 | 命令 | 别名 | 用途 | 最简示例 | 需 GPU | 需 API Key |
 | --- | --- | --- | --- | :---: | :---: |
@@ -362,6 +373,9 @@ uv run kits summarize -i live.srt
 # 指定预设：summary 概述 / highlights 高光 / setlist 歌单（用别名 sum）
 uv run kits sum -i live.srt --preset setlist -o setlist.md
 
+# 总结完成后同时渲染分享 PNG（需先安装 image extra 和 Chromium）
+uv run --extra image kits summarize -i live.srt --render-image
+
 # 用自定义提示词 JSON 覆盖内置预设
 uv run kits summarize -i live.srt --prompt-file my_prompts.json --preset mine
 ```
@@ -385,6 +399,11 @@ uv run kits summarize -i live.srt --prompt-file my_prompts.json --preset mine
 | `--preset` | 配置 default | 总结预设名（`timeline` / `summary` / `highlights` / `setlist`） |
 | `--prompt-file` | 无 | 自定义提示词 JSON，覆盖内置预设 |
 | `--max-chars` | `8000` | 单块送审最大字符数，超长字幕按此分块 |
+| `--render-image` | 关闭 | 总结 Markdown 写盘后同时渲染 PNG 图片 |
+| `--image-output` | `总结文件同名 .png` | 总结图片输出路径 |
+| `--image-width` | `1200` | 图片正文宽度（px） |
+| `--image-theme` | `light` | 图片主题，可选 `light` / `dark` |
+| `--image-scale` | `2.0` | 浏览器截图缩放比例，数值越大图片越清晰也越大 |
 
 > 自定义提示词 JSON 格式：顶层 `presets` 是「预设名 → {description, system}」字典，可选 `default`（默认预设名）和 `reduce_system`（多块合并时的提示词）。用户预设与内置预设浅合并，同名覆盖。
 
