@@ -42,4 +42,5 @@ jobs:
         run: >-
           uv run --no-project
           --with "pytest>=9.0.3" --with httpx --with pydantic --with tqdm
+          --with "markdown-it-py>=4.2.0"
           python -m pytest -q -m "not requires_torch"
