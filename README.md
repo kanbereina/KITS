@@ -198,6 +198,7 @@ uv run kits subtitle -i your_audio.mp3 -o output.srt
 | `--max-gap` | `0.7` | 判定断句的最大停顿（秒），越小切得越碎 |
 | `--max-chars` | `60` | 单条字幕最大字符数 |
 | `--max-duration` | `15.0` | 单条字幕最大时长（秒） |
+| `--max-seconds-per-char` | `0.5` | 单条字幕每字符最大时长（秒），收缩 kotoba 虚高的字幕时长（详见下方「修正时间戳漂移」）；`<=0` 关闭 |
 | `--target-chunk` | `300.0` | 分段目标时长（秒），长音频每段约这么长 |
 | `--max-chunk` | `600.0` | 单段硬上限（秒），段内无人声间隙时在此强切 |
 | `--vad-threshold` | `0.5` | VAD 语音概率阈值（0~1），高于此算人声；越大越严格（检出人声更少、间隙更多） |
@@ -242,17 +243,40 @@ uv run kits subtitle -i live.mp3 --no-punctuate
 
 首次运行会下载标点模型（约 1GB）。标点模型在 CPU 上即可快速推理。
 
-#### 长音频分段转录
+#### 修正时间戳漂移（默认开启）
 
-音频时长超过 `--max-chunk`（默认 10 分钟）时，会自动启用分段转录：
+kotoba 蒸馏模型有个固有毛病：**短语的结束时间戳常虚高**，end 会溢出到人声结束之后的静音里——十来个字的短句被标成几十秒，字幕在播放器里迟迟不消失、甚至盖过下一句造成时间倒退。
 
-1. 先用 **Silero VAD** 探出全部人声区间，反推出非语音间隙
-2. 从每段起点出发累积到 `--target-chunk`（默认 5 分钟），在其后窗口内**时长最长的人声间隙中点**处切开；若到 `--max-chunk` 仍无间隙可切（极端情况，如整段连续人声），则在硬上限处强切兜底
-3. 逐段切出临时音频 → 转录 → 该段字幕**立即追加写入 SRT**
+为此对明显偏长的字幕做两级收缩，**只缩短显示时长、不改文本与起点**，按可靠性分工：
 
-好处：实时显示 `转录第 i/N 段` 进度、边转边落盘（中途中断已转部分仍是合法 SRT）、峰值显存更低。切点都落在无人说话处，**不会把句子拦腰截断，精度与整段转录一致**。短音频则自动整段转录，无额外开销。
+1. **VAD 人声边界**（首选）：长音频转录时已探出的人声区间是真实测量值。对极虚高的字幕（每字符时长超过 `1.0` 秒），直接把 end 夹回「人声实际结束处」。实测这比单纯按语速估算更贴近真实结尾（误差 0.1~0.3 秒 vs 2.5~3.5 秒）。
+2. **字符速率**（兜底）：VAD 对不上时（如短音频没跑 VAD、或人声边界落在句外），改按 `--max-seconds-per-char`（每字符最多 0.5 秒，日语正常语速 ≥2 字/秒）估算朗读时长上限收缩。
 
-> VAD 能区分「人声 vs 音乐/噪音」，鹿乃直播常有唱歌 / BGM，这些虽不是静音，VAD 仍能在其间找到真正的人声间隙下刀，切点质量优于纯音量阈值。若想让某段更易切开，可调小 `--vad-threshold`（更易判为人声、间隙更集中）或调大 `--max-chunk` 容忍更长的段。VAD 固定走 CPU（每窗口极轻量，4 小时音频约 2 分钟扫完），不抢转录显存，扫描时显示 `VAD 扫描 N%` 进度。
+两者互斥、择一生效，对正常语速的字幕都不动。VAD 修正在**已分离人声**（`--separate` 或先用 `separate` 子命令）上最准，原始音频里 BGM / 唱歌会干扰人声边界判定。`--max-seconds-per-char` 设 `<=0` 可关闭字符速率兜底（此时仅保留 `--max-duration` 硬上限）。
+
+#### 长音频分段转录（两种模式）
+
+长音频会自动分段转录、逐段流式写盘（实时进度、边转边落盘，中途中断已转部分仍是合法 SRT）。有两种分段模式：
+
+**默认：逐 VAD 人声窗口**（对齐最准，纯说话场次推荐）
+
+用 **Silero VAD** 探出一个个「话语级人声窗口」，**只转人声窗口、丢弃窗口间静音**，每个窗口以其真实起点做偏移锚点。好处：时间戳锚定真实人声边界，根治 Whisper「前导静音把首句标成 0:00」的漂移（实测人声 23.5s 才开始时，首条字幕正确落在 23.5s 而非 0）。
+
+> ⚠️ **唱歌延音会丢字幕**：Silero VAD 按「说话」训练，对唱歌的持续长元音系统性漏判（不判为语音）→ 那段不建窗口、字幕整段丢失。实测调低 `--vad-threshold` 也救不回（延音语音概率本就接近 0）。**歌枠 / 含大量唱歌的内容请用 `--full-transcribe`。**
+
+**`--full-transcribe`：整段连续转录**（不丢唱歌，歌枠推荐）
+
+按非语音间隙把长音频切成 ~5 分钟大段、**整段连续喂给 kotoba**（段内含静音也一起转）。不靠 VAD 决定「转不转」，故唱歌延音也能识别出歌词、不丢字幕。代价：段首若有前导静音，该段首句时间戳可能偏早（kotoba 对前导静音的固有毛病）。
+
+```bash
+# 默认（纯说话场次，对齐最准）
+uv run kits subtitle -i live.mp3
+
+# 歌枠 / 含唱歌（不丢唱歌字幕）
+uv run kits subtitle -i live.mp3 --full-transcribe
+```
+
+两种模式 VAD 都固定走 CPU（silero 是 LSTM、GPU 反慢，4 小时音频约 2 分钟扫完），扫描时显示 `VAD 扫描 N%` 进度。
 
 #### 剔除游戏播报（--filter-game）
 
@@ -437,7 +461,7 @@ src/kits/
   filters.py       # 纯逻辑：剔除游戏内系统播报 / 技能语音（无 torch 依赖，可单测）
   llm.py           # 公共 OpenAI 兼容 LLM 客户端：base_url + 鉴权 + HTTP + 错误处理（仅 httpx，translate/sum 共用）
   transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按 VAD 人声间隙切分、分段流式产出 chunk 级时间戳
-  vad.py           # 语音活动检测：Silero VAD 探人声区间、反推非语音间隙作切点（延迟导入 torch/silero-vad）
+  vad.py           # 语音活动检测：Silero VAD 探人声区间，作分段切点 + 修正字幕时间戳漂移（延迟导入 torch/silero-vad）
   punctuator.py    # 标点恢复：给无标点的转录 chunk 补日语句读（延迟导入 punctuators），时间戳不变
   downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
   translator.py    # 把日语 SRT 翻译成中文 SRT（经 llm 客户端，默认 DeepSeek）
@@ -453,7 +477,7 @@ main.py            # 薄入口，委托给 kits.cli
 
 - `downloader.TwitchDownloader` 下载并合并直播，产出 MP4 / MP3，不依赖 torch
 - `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；长音频走 `plan_audio()`（VAD 探人声间隙、规划分段）+ `transcribe_segments()`（逐段流式产出）
-- `vad.VADetector.detect_gaps()` 用 Silero VAD 探人声区间、反推非语音间隙喂给分段规划（延迟导入重依赖）
+- `vad.VADetector.detect_speech()` 用 Silero VAD 探人声区间：取补集得非语音间隙喂分段规划，并作真实人声边界把 kotoba 虚高的字幕 end 夹回（延迟导入重依赖）
 - `punctuator.Punctuator.restore()` 给无标点的 chunk 补日语句读，时间戳不变（延迟导入重依赖）
 - `subtitle.segment_sentences()` 负责断句、`write_srt()` / `SrtWriter` 负责落盘（后者支持分段增量写）、`parse_srt()` 负责把 SRT 读回句子列表
 - `llm.LLMClient` 集中 OpenAI 兼容端点的鉴权与请求（默认 DeepSeek，可配 `--base-url`）；`translator.LLMTranslator` 与 `summarizer.Summarizer` 复用它

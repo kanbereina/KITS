@@ -58,6 +58,17 @@ SUPPORTED_MODELS = (
 # 默认模型必须在白名单内（CLI 的 --model 默认值取自 MODEL_ID）
 assert MODEL_ID in SUPPORTED_MODELS
 
+# 「逐 VAD 窗口转录」的 silero 原生参数默认值（经真实音频验证，见 plan_windows）。
+# min_silence 调大把句内换气并进同一话语块、减碎片；max_speech 限单窗时长防过长黏连/质量降；
+# min_speech 丢过短噪声段；threshold 取略宽松防漏判真实人声（漏判会致该段内容整段丢失）。
+VAD_WINDOW_MIN_SILENCE = 1.5
+VAD_WINDOW_MAX_SPEECH = 18.0
+VAD_WINDOW_MIN_SPEECH = 0.25
+VAD_WINDOW_THRESHOLD = 0.4
+# 每个窗口取数时两侧外扩的垫料（秒），防 VAD 边界过紧裁掉首尾音素。窗口间至少隔
+# min_silence(1.5s) > 2*pad，故加 pad 不会使相邻窗口取数区重叠。
+VAD_WINDOW_PAD = 0.2
+
 
 # 日志噪音是否已被显式配置（CLI 入口按 --verbose 设置）。库被直接调用且未配置时，
 # Transcriber.load() 兜底以安静模式配置一次，避免刷屏。
@@ -415,18 +426,20 @@ class Transcriber:
         vad_threshold: float = 0.5,
         min_silence: float = 0.5,
         make_bar: Callable[..., object] | None = None,
-    ) -> tuple[float, list[tuple[float, float]]]:
-        """规划分段：探总时长，长音频再用 VAD 探人声间隙、plan_segments 切段。
+    ) -> tuple[float, list[tuple[float, float]], list[tuple[float, float]]]:
+        """规划分段：探总时长，长音频再用 VAD 探人声区间、plan_segments 切段。
 
-        返回 (duration, segments)。这是转录前的「规划阶段」，应在转录进度条创建**之前**
-        调用——VAD 模型加载与全程扫描耗时可观，放进度条之前跑完，其日志才不会冲乱进度条
-        （与 transcriber/punctuator 模型提前 load 同理）。短音频（<= max_chunk）跳过 VAD，
-        直接返回单段 [(0, duration)]。
+        返回 (duration, segments, speech)。speech 是 VAD 探出的人声区间 [(s,e),...]（秒，
+        全局时间轴），有两用：① plan_segments 用其补集（非语音间隙）定切点；② 透传给
+        subtitle.segment_sentences，把 kotoba 虚高的 chunk end 夹回真实人声边界。
 
-        切点来源：用 Silero VAD（见 kits.vad）探出人声区间、反推非语音间隙，交给
-        plan_segments 在 (target_chunk, max_chunk) 窗口内挑最长间隙中点切。VAD 能区分
-        「人声 vs 音乐/噪音」，鹿乃长时间唱歌 / BGM 时也能找到真正的人声间隙，切点质量
-        优于旧版纯音量阈值（silencedetect）。
+        这是转录前的「规划阶段」，应在转录进度条创建**之前**调用——VAD 模型加载与全程
+        扫描耗时可观，放进度条之前跑完，其日志才不会冲乱进度条（与 transcriber/punctuator
+        模型提前 load 同理）。短音频（<= max_chunk）跳过 VAD，返回单段 + 空 speech。
+
+        切点来源：VAD 探出人声区间、反推非语音间隙，交给 plan_segments 在
+        (target_chunk, max_chunk) 窗口内挑最长间隙中点切。VAD 能区分「人声 vs 音乐/噪音」，
+        鹿乃长时间唱歌 / BGM 时也能找到真正的人声间隙，切点质量优于旧版纯音量阈值。
 
         vad_threshold: VAD 语音概率阈值（0~1），高于此算人声；越大越严格。
         min_silence: 短于此（秒）的停顿并入人声、不算间隙；越大间隙越少、段越接近整段。
@@ -439,16 +452,16 @@ class Transcriber:
 
         if duration <= max_chunk:
             print("ℹ️  音频较短，整段转录。")
-            return duration, [(0.0, duration)]
+            return duration, [(0.0, duration)], []
 
-        # 用 VAD 探出人声间隙作为切点来源。VAD 固定走 CPU：silero VAD 是 LSTM，隐状态在
-        # 时间步上串行依赖（窗口 N 必须等窗口 N-1 的 hidden state），架构上无法沿时间轴
-        # 并行/批处理，放 GPU 反被同步 + kernel launch 开销拖垮、比 CPU 慢几个数量级
-        # （CPU ~119x 实时；silero 的 model.py 亦 set_num_threads(1)、官方建议跑 CPU）。
-        from kits.vad import VADetector
+        # 用 VAD 探出人声区间。VAD 固定走 CPU：silero VAD 是 LSTM，隐状态在时间步上串行
+        # 依赖（窗口 N 必须等窗口 N-1 的 hidden state），架构上无法沿时间轴并行/批处理，
+        # 放 GPU 反被同步 + kernel launch 开销拖垮、比 CPU 慢几个数量级（CPU ~119x 实时；
+        # silero 的 model.py 亦 set_num_threads(1)、官方建议跑 CPU）。
+        from kits.vad import VADetector, speech_to_gaps
 
         print(
-            f"🔍 VAD 探测人声间隙（threshold={vad_threshold}, min_silence={min_silence}s）"
+            f"🔍 VAD 探测人声区间（threshold={vad_threshold}, min_silence={min_silence}s）"
             f"，约需 {duration / 119 / 60:.1f} 分钟..."
         )
         detector = VADetector(
@@ -478,15 +491,16 @@ class Transcriber:
             last_pct[0] = p
 
         try:
-            gaps = detector.detect_gaps(audio_file, duration, progress=_vad_progress)
+            speech = detector.detect_speech(audio_file, progress=_vad_progress)
         finally:
             if vad_bar is not None:
                 # noinspection PyUnresolvedReferences
                 vad_bar.close()
-        print(f"  找到 {len(gaps)} 段非语音间隙")
+        gaps = speech_to_gaps(speech, duration)
+        print(f"  找到 {len(speech)} 段人声、{len(gaps)} 段非语音间隙")
         segments = plan_segments(duration, gaps, target_chunk, max_chunk)
         print(f"✂️  规划为 {len(segments)} 段")
-        return duration, segments
+        return duration, segments, speech
 
     def transcribe_segments(
         self,
@@ -569,3 +583,145 @@ class Transcriber:
                 if words:
                     yield words
         _emit("✅ 全部分段转录完成！")
+
+    def plan_windows(
+        self,
+        audio_file: str,
+        vad_threshold: float = VAD_WINDOW_THRESHOLD,
+        min_silence: float = VAD_WINDOW_MIN_SILENCE,
+        max_speech: float = VAD_WINDOW_MAX_SPEECH,
+        min_speech: float = VAD_WINDOW_MIN_SPEECH,
+        make_bar: Callable[..., object] | None = None,
+    ) -> tuple[float, list[tuple[float, float]]]:
+        """规划「人声窗口」：探总时长，用调好的 silero 原生参数直接探出话语级人声窗口。
+
+        返回 (duration, windows)。windows 是 VAD 人声区间 [(s,e),...]（秒，全局时间轴），
+        每个就是一个待转录窗口——逐窗口转、以窗口起点做偏移锚点，可锚定真实人声边界、
+        根治 kotoba 前导静音漂移（旧 plan_audio 把前导静音包进首段致首句标成 0）。
+
+        与旧 plan_audio 的本质差异：不再「切含静音的连续大段」，而是「只取人声窗口、丢弃
+        窗口间静音」。代价：VAD 漏判的真实人声（false negative）会整段丢失，故 threshold
+        默认取略宽松的 0.4 兜底。无人声时返回单窗 [(0,duration)] 兜底整段转。
+
+        这是转录前的「规划阶段」，在转录进度条创建前调用——VAD 模型加载与全程扫描耗时
+        可观，放进度条之前跑完、日志才不冲乱进度条。make_bar 见 plan_audio 同名参数。
+        """
+        from kits.vad import VADetector
+
+        duration = probe_duration(audio_file)
+        print(f"\n🎵 音频总时长: {duration:.1f}s（约 {duration / 60:.1f} 分钟）")
+
+        # VAD 固定走 CPU（silero LSTM 串行依赖，GPU 反慢，见 VADetector 注释）。
+        print(
+            f"🔍 VAD 探测人声窗口（threshold={vad_threshold}, min_silence={min_silence}s, "
+            f"max_speech={max_speech}s），约需 {duration / 119 / 60:.1f} 分钟..."
+        )
+        detector = VADetector(
+            threshold=vad_threshold, min_silence=min_silence,
+            max_speech=max_speech, min_speech=min_speech, device="cpu",
+        )
+        detector.load()  # 先 load，模型加载日志在进度条前打完
+
+        if make_bar is not None:
+            vad_bar = make_bar(total=100.0, desc="🔍 VAD 扫描", unit="%")
+        else:
+            vad_bar = None
+        last_pct = [0]
+
+        def _vad_progress(pct: float) -> None:
+            p = int(pct)
+            if p <= last_pct[0]:
+                return
+            if vad_bar is not None:
+                # noinspection PyUnresolvedReferences
+                vad_bar.update(p - last_pct[0])
+            elif p % 10 == 0:
+                print(f"  VAD 扫描 {p}%")
+            last_pct[0] = p
+
+        try:
+            windows = detector.detect_speech(audio_file, progress=_vad_progress)
+        finally:
+            if vad_bar is not None:
+                # noinspection PyUnresolvedReferences
+                vad_bar.close()
+
+        if not windows:
+            print("  ⚠️ VAD 未探到人声，退化为整段转录")
+            return duration, [(0.0, duration)]
+        covered = sum(e - s for s, e in windows)
+        print(
+            f"  找到 {len(windows)} 个人声窗口，覆盖 {covered:.0f}s / {duration:.0f}s "
+            f"（丢弃 {duration - covered:.0f}s 静音）"
+        )
+        return duration, windows
+
+    def transcribe_windows(
+        self,
+        audio_file: str,
+        windows: list[tuple[float, float]],
+        duration: float,
+        language: str = "japanese",
+        beams: int = 3,
+        pad: float = VAD_WINDOW_PAD,
+        bar: object | None = None,
+    ) -> Iterator[list[Word]]:
+        """逐 VAD 人声窗口转录，流式产出（已对齐全局时间轴的）词列表。
+
+        每个窗口独立切出 → 转录 → 时间戳加回窗口起点偏移 → yield。窗口起点即真实人声
+        起点，故时间戳锚定真实边界、无前导静音漂移。窗口间被静音隔开、互不相邻，故
+        **不需要** overlap 垫料去重那套（旧 transcribe_segments 为连续大段设计）。
+
+        取数时窗口两侧各加 pad 秒垫料防裁掉首尾音素；窗口间隔 >= min_silence > 2*pad，
+        故加 pad 不致相邻窗口取数区重叠、无需去重。单窗（无人声兜底）直接整段转原文件。
+
+        bar: 可选 tqdm 进度条，量程应设为窗口总数（cli 建条时传入），每窗 update 1。
+        """
+        def _emit(msg: str) -> None:
+            if bar is not None:
+                # noinspection PyUnresolvedReferences
+                type(bar).write(msg)
+            else:
+                print(msg)
+
+        if self._pipe is None:
+            self.load()
+
+        total = len(windows)
+        # 单窗兜底（VAD 未探到人声 → [(0,duration)]）：整段转原文件，免切片重编码
+        if total == 1 and windows[0] == (0.0, duration):
+            words = self._transcribe_file(audio_file, language, beams)
+            if words:
+                yield words
+            if bar is not None:
+                # noinspection PyUnresolvedReferences
+                bar.update(1 - bar.n)
+            return
+
+        _emit(f"🎬 开始逐窗口转录（{total} 个人声窗口，垫料 {pad:.1f}s）")
+        with tempfile.TemporaryDirectory(prefix="kits_win_") as tmp:
+            tmp_dir = Path(tmp)
+            for i, (start, end) in enumerate(windows, 1):
+                win_start = max(0.0, start - pad)
+                win_end = min(duration, end + pad)
+                if bar is not None:
+                    # noinspection PyUnresolvedReferences
+                    bar.set_description(f"🎬 第 {i}/{total} 窗")
+                if _VERBOSE or bar is None:
+                    _emit(
+                        f"🎤 转录第 {i}/{total} 窗 "
+                        f"[{start:.1f}s -> {end:.1f}s, 时长 {end - start:.1f}s]..."
+                    )
+                seg_path = tmp_dir / f"win_{i:04d}.wav"
+                slice_audio(audio_file, win_start, win_end, seg_path)
+                words = self._transcribe_file(str(seg_path), language, beams)
+                seg_path.unlink(missing_ok=True)
+                if bar is not None:
+                    # noinspection PyUnresolvedReferences
+                    bar.update(1)
+                if not words:
+                    continue
+                # 时间戳加回窗口起点偏移，对齐全局时间轴（取数起点是 win_start = start-pad）
+                words = _shift_words(words, win_start)
+                yield words
+        _emit("✅ 全部窗口转录完成！")
