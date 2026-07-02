@@ -1,38 +1,99 @@
-"""downloader 模块单元测试：仅覆盖不触网的纯逻辑（URL 解析）。"""
+"""downloader 模块单元测试：仅覆盖不触网的 yt-dlp 命令构造与输出解析。"""
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
-from kits.downloader import parse_url_pattern
+from kits.downloader import DEFAULT_CONCURRENT_FRAGMENTS, DEFAULT_YTDLP_COMMAND, YtDlpDownloader
 
 
-class TestParseUrlPattern:
-    def test_parses_standard_url(self):
-        base, num, ext = parse_url_pattern(
-            "https://example.com/path/chunked/1710.ts"
+class TestYtDlpDownloader:
+    def test_build_command_defaults_to_audio_extraction(self, tmp_path):
+        downloader = YtDlpDownloader(download_dir=str(tmp_path))
+
+        command = downloader._build_command("https://example.com/watch?v=1", "live")
+
+        assert command[0] == DEFAULT_YTDLP_COMMAND
+        assert command[-1] == "https://example.com/watch?v=1"
+        assert command[command.index("--paths") + 1] == str(tmp_path)
+        assert command[command.index("--output") + 1] == "live.%(ext)s"
+        assert command[command.index("--format") + 1] == "bestaudio/best"
+        assert "--extract-audio" in command
+        assert command[command.index("--audio-format") + 1] == "mp3"
+        assert command[command.index("--concurrent-fragments") + 1] == str(DEFAULT_CONCURRENT_FRAGMENTS)
+
+    def test_build_command_appends_passthrough_args_before_url(self, tmp_path):
+        downloader = YtDlpDownloader(download_dir=str(tmp_path))
+
+        command = downloader._build_command(
+            "https://example.com/watch?v=1",
+            "live",
+            ["-f", "bestaudio", "--extract-audio"],
         )
-        assert base == "https://example.com/path/chunked/"
-        assert num == 1710
-        assert ext == ".ts"
 
-    def test_parses_zero_index(self):
-        base, num, ext = parse_url_pattern("https://x.com/chunked/0.ts")
-        assert num == 0
+        assert command[-4:] == ["-f", "bestaudio", "--extract-audio", "https://example.com/watch?v=1"]
 
-    def test_parses_quality_dir_other_than_chunked(self):
-        # 分片目录名随画质变化，160p30 / 720p60 等都要能解析
-        base, num, ext = parse_url_pattern(
-            "https://d3vd9lfkzbru3h.cloudfront.net/abc_kanotic_123/160p30/3.ts"
+    def test_rejects_invalid_concurrency(self, tmp_path):
+        with pytest.raises(ValueError):
+            YtDlpDownloader(download_dir=str(tmp_path), concurrent_fragments=0)
+
+    def test_build_command_accepts_custom_ytdlp_command(self, tmp_path):
+        downloader = YtDlpDownloader(download_dir=str(tmp_path), ytdlp_command="custom-ytdlp")
+
+        command = downloader._build_command("https://example.com/watch?v=1", "live")
+
+        assert command[0] == "custom-ytdlp"
+
+    def test_resolve_audio_path_prefers_printed_file(self, tmp_path):
+        audio = tmp_path / "printed.mp3"
+        audio.write_bytes(b"audio")
+        fallback = tmp_path / "live.mp3"
+        fallback.write_bytes(b"fallback")
+        downloader = YtDlpDownloader(download_dir=str(tmp_path))
+
+        path = downloader._resolve_audio_path("live", str(audio), newer_than=0)
+
+        assert path == audio
+
+    def test_download_from_url_uses_subprocess_without_network(self, tmp_path, monkeypatch):
+        seen: dict = {}
+        audio = tmp_path / "live.mp3"
+
+        def fake_run(command, capture_output, text, encoding, errors, check):
+            seen["command"] = command
+            audio.write_bytes(b"audio")
+            return subprocess.CompletedProcess(command, 0, stdout=str(audio), stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        downloader = YtDlpDownloader(download_dir=str(tmp_path))
+
+        outputs = downloader.download_from_url(
+            "https://example.com/watch?v=1",
+            output_name="live",
+            extra_args=["--cookies", "cookies.txt"],
         )
-        assert base == "https://d3vd9lfkzbru3h.cloudfront.net/abc_kanotic_123/160p30/"
-        assert num == 3
-        assert ext == ".ts"
 
-    def test_raises_on_non_ts_extension(self):
-        with pytest.raises(ValueError):
-            parse_url_pattern("https://example.com/chunked/1710.mp4")
+        assert seen["command"][-3:] == ["--cookies", "cookies.txt", "https://example.com/watch?v=1"]
+        assert outputs == {"audio": audio}
 
-    def test_raises_on_non_numeric_filename(self):
-        with pytest.raises(ValueError):
-            parse_url_pattern("https://example.com/chunked/playlist.ts")
+    def test_download_from_url_raises_on_ytdlp_failure(self, tmp_path, monkeypatch):
+        def fake_run(command, capture_output, text, encoding, errors, check):
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="failed")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        downloader = YtDlpDownloader(download_dir=str(tmp_path))
+
+        with pytest.raises(RuntimeError, match="yt-dlp 下载失败"):
+            downloader.download_from_url("https://example.com/watch?v=1")
+
+    def test_download_from_url_reports_missing_ytdlp(self, tmp_path, monkeypatch):
+        def fake_run(command, capture_output, text, encoding, errors, check):
+            raise FileNotFoundError
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        downloader = YtDlpDownloader(download_dir=str(tmp_path))
+
+        with pytest.raises(RuntimeError, match="pip install -U yt-dlp"):
+            downloader.download_from_url("https://example.com/watch?v=1")
