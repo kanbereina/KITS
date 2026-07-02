@@ -16,7 +16,7 @@
 
 """命令行入口：子命令 download / subtitle / translate / separate / summarize。
 
-download:  下载 Twitch 直播 -> 合并 MP4 -> 可选 MP3 / SRT
+download:  用 yt-dlp 下载视频/直播回放 -> MP3 / 可选 SRT
 subtitle:  已有音频 -> SRT 字幕（可选 --separate 先分离人声）
 translate: 日语 SRT -> 中文 SRT（AI 翻译）
 separate:  从音频分离出人声（audio-separator）
@@ -26,7 +26,7 @@ sum:       已有 SRT -> AI 总结（提示词走 JSON 预设）
 from __future__ import annotations
 
 import argparse
-import asyncio
+import shlex
 import sys
 from pathlib import Path
 
@@ -160,6 +160,14 @@ def _add_subtitle_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _split_ytdlp_passthrough(argv: list[str]) -> tuple[list[str], list[str]]:
+    """拆出裸 `--` 后的 yt-dlp 原生参数。"""
+    if "--" not in argv:
+        return argv, []
+    index = argv.index("--")
+    return argv[:index], argv[index + 1 :]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kits",
@@ -180,16 +188,16 @@ def build_parser() -> argparse.ArgumentParser:
     # --- download 子命令 ---
     dl = sub.add_parser(
         "download", aliases=["dl"], parents=[verbose_parent],
-        help="下载 Twitch 直播并合并为 MP4",
+        help="用 yt-dlp 下载视频/直播回放并提取音频",
     )
-    dl.add_argument("url", help="TS 文件示例 URL，形如 https://.../chunked/1710.ts")
+    dl.add_argument("url", help="yt-dlp 支持的视频/直播回放 URL")
     dl.add_argument("-o", "--output", default="output", help="输出文件名(不含扩展名)")
     dl.add_argument("--dir", default="downloads", help="下载目录")
-    dl.add_argument("--start", type=int, default=None, help="起始编号(默认 0，下载整场)")
-    dl.add_argument("--end", type=int, default=None, help="结束编号(默认二分探测)")
-    dl.add_argument("--concurrent", type=int, default=5, help="最大并发下载数")
-    dl.add_argument("--keep-ts", action="store_true", help="保留临时 TS 文件")
-    dl.add_argument("--mp3", action="store_true", help="额外导出 MP3 音频")
+    dl.add_argument(
+        "--yt-dlp-args",
+        default=None,
+        help='额外透传给 yt-dlp 的原生参数字符串，如 --yt-dlp-args="-f bestaudio --extract-audio"',
+    )
     dl.add_argument("--srt", action="store_true", help="额外生成 SRT 字幕(自动转录音频)")
     _add_subtitle_args(dl)
     dl.set_defaults(func=_run_download)
@@ -458,30 +466,28 @@ def _print_preview(sentences: list[Sentence], output_srt: str) -> None:
 
 
 def _run_download(args: argparse.Namespace) -> None:
-    from kits.downloader import TwitchDownloader
+    from kits.downloader import YtDlpDownloader
 
     print("=" * 60)
-    print("🐙 Twitch 直播下载")
+    print("🐙 下载")
     print("=" * 60)
 
-    downloader = TwitchDownloader(download_dir=args.dir, max_concurrent=args.concurrent)
-    # 生成 SRT 必然需要音频，故强制提取 MP3
-    need_mp3 = args.mp3 or args.srt
-    outputs = asyncio.run(
-        downloader.download_from_url(
-            args.url,
-            output_name=args.output,
-            start_num=args.start,
-            end_num=args.end,
-            keep_ts=args.keep_ts,
-            extract_audio=need_mp3,
-        )
+    extra_args = []
+    if args.yt_dlp_args:
+        extra_args.extend(shlex.split(args.yt_dlp_args))
+    extra_args.extend(getattr(args, "yt_dlp_passthrough", []))
+
+    downloader = YtDlpDownloader(download_dir=args.dir)
+    outputs = downloader.download_from_url(
+        args.url,
+        output_name=args.output,
+        extra_args=extra_args,
     )
 
     if args.srt:
-        mp3_path = outputs["mp3"]
-        srt_path = str(Path(mp3_path).with_suffix(".srt"))
-        _audio_to_srt(str(mp3_path), srt_path, args)
+        audio_path = outputs["audio"]
+        srt_path = str(Path(audio_path).with_suffix(".srt"))
+        _audio_to_srt(str(audio_path), srt_path, args)
 
     print("\n✨ 产物:")
     for kind, path in outputs.items():
@@ -659,7 +665,13 @@ def main(argv: list[str] | None = None) -> None:
         if reconfigure is not None:
             reconfigure(encoding="utf-8", errors="replace")
 
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parse_argv, ytdlp_passthrough = _split_ytdlp_passthrough(raw_argv)
+
+    args = build_parser().parse_args(parse_argv)
+    if ytdlp_passthrough and args.command not in {"download", "dl"}:
+        raise SystemExit("只有 download 子命令支持 `--` 后透传 yt-dlp 参数")
+    args.yt_dlp_passthrough = ytdlp_passthrough
     # 按 --verbose 统一设置底层库日志噪音（默认安静）。transcriber 顶层无重依赖，
     # 仅导入此函数不会拉起 torch。
     from kits.transcriber import configure_logging

@@ -10,7 +10,7 @@ _鹿乃 Twitch 直播智能总结_
 [![CUDA](https://img.shields.io/badge/CUDA-12.8-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
 [![PyTorch](https://img.shields.io/badge/PyTorch-cu128-EE4C2C?logo=pytorch&logoColor=white)](https://pytorch.org/)
 
-一站式处理鹿乃 Twitch 直播：**下载直播 → 分离人声 → 转写 SRT 日语字幕文件 → 可选转写 SRT 中文字幕文件 → AI 总结**。
+一站式处理鹿乃直播/视频：**下载音视频 → 分离人声 → 转写 SRT 日语字幕文件 → 可选转写 SRT 中文字幕文件 → AI 总结**。
 
 </div>
 
@@ -23,7 +23,7 @@ _鹿乃 Twitch 直播智能总结_
 - [安装与部署](#安装与部署)
   - [环境要求一览](#环境要求一览)
 - [使用方法](#使用方法)
-  - [download：下载 Twitch 直播](#download下载-twitch-直播)
+  - [download：下载直播/视频](#download下载直播视频)
   - [subtitle：音频转字幕](#subtitle音频转字幕)
     - [标点恢复（默认开启）](#标点恢复默认开启)
     - [长音频分段转录](#长音频分段转录)
@@ -49,8 +49,9 @@ _鹿乃 Twitch 直播智能总结_
 
 ## 功能特性
 
-- 🐙 异步并发下载 Twitch 直播 TS 分片，自动探测视频长度，合并为 MP4
-- 🎵 可选提取 MP3 音频，可选保留 / 清理临时 TS 文件
+- 📥 内置 yt-dlp 下载后端，支持 Twitch / YouTube 等更多平台的视频与直播回放
+- 🎵 `download` 默认提取最佳音频为 MP3，直接复用转字幕、翻译、总结流水线
+- 🔧 可用 `--` 或 `--yt-dlp-args` 透传 yt-dlp 原生参数
 - 🎤 使用 Whisper 进行语音识别，默认 `kotoba-whisper-v2.2`（日语识别更准的蒸馏模型）
 - ✂️ 句子级断句，按句末标点 / 停顿 / 长度上限智能切分，保证句子完整不被拦腰截断
 - ✒️ 蒸馏模型只产短语级时间戳且不带标点，自动用标点模型补日语句读（。！？）后再断句，时间戳原样保留
@@ -71,7 +72,8 @@ _鹿乃 Twitch 直播智能总结_
 **1. 准备系统依赖**
 
 - [uv](https://docs.astral.sh/uv/)（包管理 + 运行器）— 装好后 `uv --version` 应有输出
-- [ffmpeg](https://ffmpeg.org/download.html) — 须在 PATH 中，`ffmpeg -version` 应有输出（合并 MP4 / 提取 MP3 / 音频切分都依赖它）
+- [ffmpeg](https://ffmpeg.org/download.html) — 须在 PATH 中，`ffmpeg -version` 应有输出（yt-dlp 音频提取/转码、音频切分都依赖它）
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — 须在 PATH 中，`yt-dlp --version` 应有输出；建议自行保持最新版：`pip install -U yt-dlp`
 - GPU — 转字幕、分离人声需要。Nvidia 显卡（`nvidia-smi` 应能看到显卡）或 Apple Silicon（M 系列芯片，走 MPS 加速）二选一
 
 **2. 克隆并同步依赖**
@@ -80,6 +82,7 @@ _鹿乃 Twitch 直播智能总结_
 git clone https://github.com/kanbereina/KITS.git
 cd KITS
 uv sync              # 创建虚拟环境并装齐所有依赖（含 dev 组）
+pip install -U yt-dlp # 安装/更新 yt-dlp；它更新频繁，不随 uv lock 固定版本
 ```
 
 `uv sync` 会按平台自动选对依赖：
@@ -93,6 +96,7 @@ uv sync              # 创建虚拟环境并装齐所有依赖（含 dev 组）
 uv run kits --help          # 看到子命令说明即安装成功
 # Nvidia 应输出 CUDA: True；Apple Silicon 应输出 MPS: True
 uv run python -c "import torch; print('CUDA:', torch.cuda.is_available(), '| MPS:', torch.backends.mps.is_available())"
+yt-dlp --version            # 应输出版本号；下载站点适配异常时先 pip install -U yt-dlp
 ```
 
 **4.（可选）配置大模型 API Key**
@@ -123,7 +127,8 @@ uv run --extra image playwright install chromium
 | Python | 3.12 ~ 3.14 | 由 uv 管理虚拟环境 |
 | GPU | 支持 CUDA 的 Nvidia 显卡，或 Apple Silicon（M 系列） | 转字幕 / 分离人声强制要求；仅下载不需要 |
 | CUDA | 12.8（仅 Nvidia） | Linux/Win 的 PyTorch 从 `pytorch-cu128` 源安装，勿换 PyPI 默认源；macOS 不需要 |
-| ffmpeg | 在 PATH 中 | 合并 MP4、提取 MP3、音频切分 |
+| ffmpeg | 在 PATH 中 | yt-dlp 音频提取/转码、音频切分 |
+| yt-dlp | 在 PATH 中，建议最新版 | 下载 Twitch / YouTube 等视频或直播回放；自行 `pip install -U yt-dlp` 更新 |
 | API Key | 大模型（可选） | 仅 `translate` / `summarize` 需要，默认 DeepSeek |
 | markdown-it-py + Playwright + Chromium | 可选 | 仅 `summarize --render-image` 需要，用于 Markdown 渲染与 HTML 截图 |
 
@@ -133,7 +138,7 @@ uv run --extra image playwright install chromium
 
 | 命令 | 别名 | 用途 | 最简示例 | 需 GPU | 需 API Key |
 | --- | --- | --- | --- | :---: | :---: |
-| [`download`](#download下载-twitch-直播) | `dl` | 下载 Twitch 直播，合并 MP4 / 提取 MP3 | `uv run kits dl "<ts_url>" -o name` | 否¹ | 否 |
+| [`download`](#download下载直播视频) | `dl` | 用 yt-dlp 下载视频/直播回放，默认导出 MP3 | `uv run kits dl "<url>" -o name` | 否¹ | 否 |
 | [`subtitle`](#subtitle音频转字幕) | `srt` | 音频转带时间戳的 SRT 字幕 | `uv run kits srt -i audio.mp3` | 是 | 否 |
 | [`translate`](#translate日语字幕译中文) | `tr` | 日语 SRT 翻译成中文 SRT | `uv run kits tr -i live.srt` | 否 | 是 |
 | [`separate`](#separate分离人声) | `sep` | 从音频分离出人声，去 BGM / 伴奏 | `uv run kits sep -i audio.mp3` | 是 | 否 |
@@ -141,36 +146,36 @@ uv run --extra image playwright install chromium
 
 > ¹ `download` 本身不需要 GPU；但加 `--srt`（下载后自动转字幕）会调用 Whisper，需要 GPU。
 
-### download：下载 Twitch 直播
+### download：下载直播/视频
 
-传入任意一个 TS 分片的 URL（形如 `https://.../chunked/1710.ts`），自动探测整场直播范围并下载合并:
+`download` 统一调用 PATH 中的 `yt-dlp` 命令。默认选择最佳音频并提取为 MP3，产物可直接交给 `subtitle` / `translate` / `summarize` 流水线；Twitch VOD、YouTube 和其他 yt-dlp 支持的网站都走同一条路径。
 
 ```bash
-# 下载并合并为 MP4
-uv run kits download "https://.../chunked/1710.ts" -o my_stream
+# 下载视频/直播回放音频，默认输出 downloads/live.mp3
+uv run kits download "https://www.youtube.com/watch?v=..." -o live
 
-# 下载 + 提取 MP3
-uv run kits download "https://.../chunked/1710.ts" -o my_stream --mp3
+# 一条龙：下载音频 -> 生成 SRT 字幕
+uv run kits download "https://www.twitch.tv/videos/..." -o live --srt
 
-# 一条龙：下载 -> 提取音频 -> 生成 SRT 字幕
-uv run kits download "https://.../chunked/1710.ts" -o my_stream --srt
+# 透传 yt-dlp 原生参数：`--` 后的内容原样交给 yt-dlp
+uv run kits download "https://youtu.be/..." -- -f bestaudio --extract-audio
+
+# 也可以用字符串形式透传，适合脚本里集中配置
+uv run kits download --yt-dlp-args="-f bestaudio --extract-audio" "https://youtu.be/..."
 ```
 
-产物默认放在 `downloads/` 目录下。
+产物默认放在 `downloads/` 目录下。yt-dlp 分片下载并发默认固定为 5；需要调整时可透传 `--concurrent-fragments N`。
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `url` | （必填） | TS 分片示例 URL（仅用于定位地址，编号被忽略） |
+| `url` | （必填） | yt-dlp 支持的视频/直播回放 URL |
 | `-o, --output` | `output` | 输出文件名（不含扩展名） |
 | `--dir` | `downloads` | 下载 / 输出目录 |
-| `--start` | `0` | 起始分片编号，默认从 0 下载整场直播 |
-| `--end` | 二分探测 | 结束分片编号，默认指数探测 + 二分自动定位结尾 |
-| `--concurrent` | `5` | 最大并发下载数 |
-| `--keep-ts` | 关闭 | 保留临时 TS 文件 |
-| `--mp3` | 关闭 | 额外导出 MP3 |
-| `--srt` | 关闭 | 额外生成 SRT 字幕（自动转录，隐含导出 MP3） |
+| `--yt-dlp-args` | 无 | 额外透传给 yt-dlp 的原生参数字符串 |
+| `--srt` | 关闭 | 额外生成 SRT 字幕（自动转录下载后的音频） |
+| `-- ...` | 无 | `--` 后的参数原样透传给 yt-dlp |
 
-> `--srt` 会调用 Whisper 转录，需要 GPU。还支持下方 `subtitle` 的全部断句参数（`--max-gap` 等）。
+> `--srt` 会调用 Whisper 转录，需要 GPU。yt-dlp 对正在直播中的流支持取决于站点与 yt-dlp 本身；下载站点适配异常时先运行 `pip install -U yt-dlp` 更新。KITS 侧主要复用已下载音频做转录、翻译与总结。还支持下方 `subtitle` 的全部断句参数（`--max-gap` 等）。
 
 ### subtitle：音频转字幕
 
@@ -463,7 +468,7 @@ src/kits/
   transcriber.py   # Whisper 模型加载 + GPU 转录，长音频按 VAD 人声间隙切分、分段流式产出 chunk 级时间戳
   vad.py           # 语音活动检测：Silero VAD 探人声区间，作分段切点 + 修正字幕时间戳漂移（延迟导入 torch/silero-vad）
   punctuator.py    # 标点恢复：给无标点的转录 chunk 补日语句读（延迟导入 punctuators），时间戳不变
-  downloader.py    # Twitch 直播下载：异步下载 TS -> 合并 MP4 -> 提取 MP3
+  downloader.py    # yt-dlp 下载后端，默认产出 MP3 音频
   translator.py    # 把日语 SRT 翻译成中文 SRT（经 llm 客户端，默认 DeepSeek）
   separator.py     # 人声分离：封装 audio-separator（延迟导入，默认只出 Vocals 轨）
   summarizer.py    # 总结 SRT，提示词走 JSON 预设、长字幕 map-reduce 分块（经 llm 客户端，默认 DeepSeek）
@@ -475,7 +480,7 @@ main.py            # 薄入口，委托给 kits.cli
 
 各模块职责清晰、相互解耦:
 
-- `downloader.TwitchDownloader` 下载并合并直播，产出 MP4 / MP3，不依赖 torch
+- `downloader.YtDlpDownloader` 调用 yt-dlp 下载更多平台的视频/直播回放，默认产出 MP3 音频，不依赖 torch
 - `transcriber.Transcriber.transcribe()` 把音频转成（chunk/短语级）时间戳列表；长音频走 `plan_audio()`（VAD 探人声间隙、规划分段）+ `transcribe_segments()`（逐段流式产出）
 - `vad.VADetector.detect_speech()` 用 Silero VAD 探人声区间：取补集得非语音间隙喂分段规划，并作真实人声边界把 kotoba 虚高的字幕 end 夹回（延迟导入重依赖）
 - `punctuator.Punctuator.restore()` 给无标点的 chunk 补日语句读，时间戳不变（延迟导入重依赖）
@@ -483,7 +488,7 @@ main.py            # 薄入口，委托给 kits.cli
 - `llm.LLMClient` 集中 OpenAI 兼容端点的鉴权与请求（默认 DeepSeek，可配 `--base-url`）；`translator.LLMTranslator` 与 `summarizer.Summarizer` 复用它
 - `separator.VocalSeparator.separate()` 用 audio-separator 分离人声（延迟导入重依赖）
 - `summarizer.Summarizer.summarize()` 按预设提示词总结字幕，长字幕分块再合并
-- `cli` 把它们串成流水线：`download --srt` 即「下载 -> 提取音频 -> 转字幕」，`subtitle --separate` 即「分离人声 -> 转字幕」
+- `cli` 把它们串成流水线：`download --srt` 即「yt-dlp 下载音频 -> 转字幕」，`subtitle --separate` 即「分离人声 -> 转字幕」
 
 ## 断句逻辑
 
